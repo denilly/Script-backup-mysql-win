@@ -1,0 +1,2183 @@
+# -----------------------------------------------------------------------------
+# Nome do arquivo de script: script-backup-mysql.ps1
+# Descrição: Script para realizar o backup/dump do banco de dados Mysql/Mariadb, 
+#            compactação e exclusão de backups antigos em ambiente MS Windows.
+# Autor: Denilly Carvalho do Carmo
+# Data de Criação: 25/06/2025
+# Copyright (c) 2025 Denilly Carvalho do Carmo. Todos os direitos reservados.
+# Licença: GNU General Public License (GPL) versão 3
+# Versão: 1.0
+#
+# NOTAS: Este script é fornecido "como está" e pode ser utilizado e modificado por terceiros,
+#        desde que os créditos ao autor sejam mantidos. Para uso em projetos, por favor, faça
+#        referência a este script e ao autor.
+#
+# IMPORTANTE: Execute este script com ou sem argumentos para realizar o backup/dump do banco
+#             de dados dentre outras funções. Caso não seja informado nenhum argumento, será 
+#             aberto um menu interativo.
+#             Utilize argumentos para execução do script diretamente via comando ou agendamento
+#             no Agendador de Tarefas do Windows. Acesse a opção de ajuda "-h/--help" do script 
+#             para maiores informações.
+#             Os logs gerados pelo script são rotacionados automaticamente quando o log está 
+#             habilitado (-l/--log), com rotação diária, retenção de 10 logs e compressão NTFS.
+#             Os parâmetros de rotação podem ser ajustados conforme a necessidade.
+#
+# COMO USAR:
+# 1. Crie o arquivo do script com o seu editor preferido:
+#    > notepad C:\backup\scripts\script-backup-mysql.ps1
+# 2. Cole o código deste arquivo no editor, ajustes os parâmetros comentados com "<--" (quando  
+#    necessário) e salve o arquivo.
+# 3. Conceder as permissões NTFS de controle total, como não herdadas e somente para a conta de 
+#    sistema "SYSTEM", uma conta ADM Local, de domínio ou grupo específico de acordo com as suas
+#    políticas de segurança.
+# 4. Checar políticas de execução de scripts no PowerShell, e, se necessário, ajustar conforme 
+#    política interna:
+#    > Get-ExecutionPolicy -List
+#    > Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force
+# 5. Execute o script com "-l/--log" e "-k/--check" para criar o arquivo de log e checar requisitos:
+#    > .\script-backup-mysql.ps1 -l -k
+# -----------------------------------------------------------------------------
+
+#  1. =============================== CONFIGURAÇÕES ===============================
+$ScriptVersion = '1.0'
+$ScriptRevision = '25/06/2025'
+
+# Credenciais e demais configurações do SGBD
+$SGBDUsername = "login_usuario"    # <-- Informe o usuário com acesso aos Banco de Dados
+$SGBDPassword = "senha_usuario"     # <-- Senha do usuário (Se a conta não existir, será criada uma com esta senha)
+$MySQLBinPath = "C:\Program Files\MySQL\MySQL Server 8.0\bin"    # <-- Caminho completo dos executáveis. Ajuste conforme instalação.
+$SGBDHost = "127.0.0.1"    # <-- Informe o host do banco de dados (localhost ou IP)
+$SGBDPort = "3306"         # <-- Informe a porta do banco de dados (padrão: 3306)
+$SGBDConnTimeout = "5"    # Timeout em segundos para conexão com o Banco de Dados
+$SGBDParams = "--single-transaction --quick --routines --events --triggers"    # Parâmetros padrão para o msqldump
+
+$DefaultBackupDir = "C:\backup\banco_dados"    # <-- Diretório padrão de destino do backup
+$DefaultCompress = "nao"    # Compactação
+$DefaultVerify = "sim"      # Verificação de integridade
+$DefaultRetentionDays = 10    # <-- Dias de retenção do backup
+
+$MyCnfTemp = "$env:TEMP\.my.cnf.tmp"    # Arquivo temporário de configuração segura de login Mysql/Mariadb
+
+# Log
+$LogDir = "C:\Logs"    # <-- Caminho para o log do sistema ou outro se preferir
+$ScriptName = [System.IO.Path]::GetFileName($PSCommandPath)
+$LogFile = Join-Path $LogDir "$ScriptName.log"    # Nome do arquivo de log
+$Global:LogDebug = $false    # Log desabilitado por padrão
+
+# Rotação do Log
+$LogRotationType = "Both"    # <-- Tipo de rotação: "Daily" (diária), "Size" (por tamanho), ou "Both" (ambos)
+$LogMaxSizeMB = 1             # <-- Tamanho máximo do log antes da rotação (em MB, usado se RotationType for "Size" ou "Both")
+$LogRotateCount = 10          # <-- Número máximo de logs rotacionados a manter (equivalente a "rotate 10" do logrotate)
+$LogCompressNTFS = $true      # <-- Habilitar compressão NTFS para logs rotacionados (equivalente a "compress")
+
+# Garante diretórios
+if (!(Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+if (!(Test-Path $DefaultBackupDir)) { New-Item -ItemType Directory -Path $DefaultBackupDir | Out-Null }
+
+#  2. ================================== FUNÇÕES ==================================
+# Funções de texto formatado
+function Write-Titulo($Message) {
+    Write-Host "$Message" -BackgroundColor DarkBlue
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "$Message" }
+}
+
+function Write-SubTitulo($Message) {
+    Write-Host "$Message" -BackgroundColor DarkGray
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "$Message" }
+}
+
+function Write-Texto($Message) {
+    Write-Host "$Message"
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "$Message" }
+}
+
+# Funções de log
+function Write-LogInfo($Message) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[INFO] [$timestamp] $Message" -ForegroundColor Cyan
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "[INFO] [$timestamp] $Message" }
+}
+
+function Write-LogSuccess($Message) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[OK] [$timestamp] $Message" -ForegroundColor Green
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "[OK] [$timestamp] $Message" }
+}
+
+function Write-LogError($Message) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[ERRO] [$timestamp] $Message" -ForegroundColor Red
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "[ERRO] [$timestamp] $Message" }
+}
+
+function Write-LogWarn($Message) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[AVISO] [$timestamp] $Message" -ForegroundColor Yellow
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "[AVISO] [$timestamp] $Message" }
+}
+
+# Função para rotacionar logs, similar ao logrotate
+function Rotate-LogFile {
+    # Verifica se o diretório de logs existe
+    if (-not (Test-Path $LogDir -PathType Container)) {
+        Write-Texto ""
+        try {
+            New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+            Write-LogSuccess "Diretório de logs criado: $LogDir"
+        } catch {
+            Write-LogError "Falha ao criar diretório de logs: $LogDir. Erro: $_"
+            return
+        }
+    }
+
+    # Verifica se o arquivo de log existe
+    if (-not (Test-Path $LogFile)) {
+        Write-Texto ""
+        try {
+            New-Item -ItemType File -Path $LogFile -Force | Out-Null
+            Write-LogInfo "Arquivo de log criado: $LogFile"
+        } catch {
+            Write-LogError "Falha ao criar arquivo de log: $LogFile. Erro: $_"
+            return
+        }
+        return
+    }
+
+    # Captura as propriedades do arquivo antes de qualquer escrita
+    $currentLog = Get-Item $LogFile -ErrorAction SilentlyContinue
+    $logLastWriteTime = $currentLog.LastWriteTime
+    $logLength = $currentLog.Length
+    $currentDate = Get-Date
+
+    # Determina se a rotação é necessária
+    $rotate = $false
+
+    if ($LogRotationType -eq "Daily" -or $LogRotationType -eq "Both") {
+        if ($logLastWriteTime.Date -lt $currentDate.Date) {
+            $rotate = $true
+        }
+    }
+
+    if ($LogRotationType -eq "Size" -or $LogRotationType -eq "Both") {
+        if ($logLength / 1MB -gt $LogMaxSizeMB) {
+            $rotate = $true
+        }
+    }
+
+    # Registra a verificação de rotação após a decisão
+    Write-Texto ""
+    Write-LogInfo "Verificando necessidade de rotação do log: $LogFile"
+    if ($rotate) {
+        if ($LogRotationType -eq "Daily" -or $LogRotationType -eq "Both") {
+            if ($logLastWriteTime.Date -lt $currentDate.Date) {
+                Write-LogInfo "Rotação necessária: Log está em uma data anterior ($($logLastWriteTime.Date))."
+            }
+        }
+        if ($LogRotationType -eq "Size" -or $LogRotationType -eq "Both") {
+            if ($logLength / 1MB -gt $LogMaxSizeMB) {
+                Write-LogInfo "Rotação necessária: Tamanho do log ($([math]::Round($logLength / 1MB, 2)) MB) excede $LogMaxSizeMB MB."
+            }
+        }
+    } else {
+        Write-LogInfo "Nenhuma rotação de log necessária no momento."
+        return
+    }
+
+    # Gera o novo nome do log rotacionado (e.g., script-backup-mysql.ps1.20250613.log)
+    $timestamp = $currentDate.ToString("yyyyMMddHHmmss")
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($LogFile)
+    $extension = [System.IO.Path]::GetExtension($LogFile)
+    $newLogName = Join-Path $LogDir "$baseName$extension.$timestamp.old"
+
+    # Renomeia o log atual
+    try {
+        Rename-Item -Path $LogFile -NewName $newLogName -Force -ErrorAction Stop
+        Write-LogSuccess "Log rotacionado: $LogFile -> $newLogName"
+    } catch {
+        Write-LogError "Falha ao rotacionar log: $LogFile. Erro: $_"
+        return
+    }
+
+    # Cria um novo arquivo de log vazio
+    try {
+        New-Item -ItemType File -Path $LogFile -Force | Out-Null
+        Write-LogSuccess "Novo arquivo de log criado: $LogFile"
+    } catch {
+        Write-LogError "Falha ao criar novo arquivo de log: $LogFile. Erro: $_"
+        return
+    }
+
+    # Aplica compressão NTFS ao log rotacionado, se habilitado
+    if ($LogCompressNTFS) {
+        try {
+            $newLog = Get-Item $newLogName
+            compact /C $newLog | Out-Null
+            Write-LogSuccess "Log comprimido com NTFS: $newLogName"
+        } catch {
+            Write-LogError "Falha ao aplicar compressão NTFS ao log: $newLogName. Erro: $_"
+        }
+    }
+
+    # Limpa logs antigos (mantém $LogRotateCount)
+    $logPattern = "$baseName$extension.*.old"
+    $oldLogs = Get-ChildItem -Path $LogDir -Filter $logPattern | Where-Object { $_.Name -ne [System.IO.Path]::GetFileName($LogFile) } | Sort-Object LastWriteTime -Descending
+    if ($oldLogs.Count -ge $LogRotateCount) {
+        $logsToDelete = $oldLogs | Select-Object -Skip ($LogRotateCount - 1)
+        foreach ($log in $logsToDelete) {
+            try {
+                Remove-Item -Path $log.FullName -Force -ErrorAction Stop
+                Write-LogSuccess "Log antigo removido: $($log.FullName)"
+            } catch {
+                Write-LogError "Falha ao remover log antigo: $($log.FullName). Erro: $_"
+            }
+        }
+    }
+}
+
+# Manipulação do .my.cnf temporário
+function Create-MyCnf {
+    param([string]$User, [string]$Password)
+    Set-Content -Path $MyCnfTemp -Value "[client]`nuser=$User`npassword=$Password" -Encoding ASCII
+}
+
+function Remove-MyCnf {
+    if (Test-Path $MyCnfTemp) {
+        Remove-Item -Force $MyCnfTemp
+    }
+}
+
+# Execução de comandos MySQL e MySQLDump
+function Run-MySQLCommand($Query) {
+    Create-MyCnf -User $SGBDUsername -Password $SGBDPassword
+    $cmd = "mysql --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort --connect-timeout=$SGBDConnTimeout -e `"$Query`""
+    Invoke-Expression $cmd
+    Remove-MyCnf
+}
+
+function Run-MySQLCommandRaw($Query) {
+    Create-MyCnf -User $SGBDUsername -Password $SGBDPassword
+    $cmd = "mysql --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort --connect-timeout=$SGBDConnTimeout -s -N -e `"$Query`""
+    Invoke-Expression $cmd
+    Remove-MyCnf
+}
+
+function Run-MySQLDump {
+    param([string]$Database, [string]$Table = "")
+    Create-MyCnf -User $SGBDUsername -Password $SGBDPassword
+    $target = if ($Table) { "$Database $Table" } else { $Database }
+    $cmd = "mysqldump --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort $SGBDParams $target"
+    Invoke-Expression $cmd
+    Remove-MyCnf
+}
+
+# Função para gerar Checksum
+function Generate-Checksum {
+    param([string]$FilePath)
+    $hash = Get-FileHash -Path $FilePath -Algorithm SHA256
+    $ChecksumFile = "$FilePath.sha256"
+    $hash.Hash | Out-File -FilePath $ChecksumFile -Encoding ASCII
+    Write-LogSuccess "Checksum gerado: $ChecksumFile"
+}
+
+# Validar diretório
+function Validate-Directory {
+    param(
+        [string]$Path
+    )
+
+    $Dir = $Path.Trim()
+
+    if (Test-Path $Dir -PathType Container) {
+        try {
+            $testFile = [System.IO.Path]::Combine($Dir, ".__test")
+            New-Item -ItemType File -Path $testFile -Force | Out-Null
+            Remove-Item -Path $testFile -Force
+        } catch {
+            Write-LogError "Sem permissão de gravação no diretório: $Dir"
+            return $false
+        }
+        return $true
+    } elseif ((Test-Path $Dir -PathType Leaf) -and ($Dir -match "\.tar\.bz2$")) {
+        try {
+            Get-Content $Dir -TotalCount 1 | Out-Null
+        } catch {
+            Write-LogError "Sem permissão de leitura no arquivo: $Dir"
+            return $false
+        }
+        return $true
+    } else {
+        Write-LogError "O caminho completo informado não existe: $Dir"
+        return $false
+    }
+}
+
+# Testar Conexão Mysql
+function Test-MySQLConnection {
+    Write-LogInfo "Testando conexão com o MySQL em ${SGBDHost}:${SGBDPort} com o usuário '$SGBDUsername'..."
+
+    try {
+        $result = Run-MySQLCommandRaw "SELECT 1;"
+        if (-not $result) {
+            throw "Conexão falhou"
+        }
+        Write-LogSuccess "Conexão com o MySQL em ${SGBDHost}:${SGBDPort} estabelecida com sucesso."
+        return $true
+    } catch {
+        Write-LogError "Falha na conexão com o MySQL em ${SGBDHost}:${SGBDPort} usando o usuário '$SGBDUsername'."
+        return $false
+    }
+}
+
+function Test-CompressionDependencies {
+    $Dependencies = @("tar.exe", "bzip2.exe")
+    $Faltando = $false
+
+    foreach ($cmd in $Dependencies) {
+        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+            Write-LogError "Dependência '$cmd' não encontrada. Instale o pacote correspondente versão Windows."
+            $Faltando = $true
+        }
+    }
+
+    if ($Faltando) {
+        Write-Texto "`nAbortando."
+        return $false
+    }
+
+    return $true
+}
+
+# Função para Backup de todos os bancos
+function Backup-AllDatabases {
+    param (
+        [string]$Destination = $DefaultBackupDir,
+        [string]$Compress = $DefaultCompress,
+        [string]$Verify = $DefaultVerify
+    )
+
+    Write-SubTitulo "=> Executando opção de backup de todos os banco de dados"
+
+    # Validação do diretório
+    if (-not (Validate-Directory -Path $Destination)) {
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    if (-not (Test-MySQLConnection)) { 
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    $DateNow = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $BackupDir = Join-Path $Destination $DateNow
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+
+    Write-LogInfo "Iniciando backup de todos os bancos para: $BackupDir"
+
+    $databases = Run-MySQLCommandRaw "SHOW DATABASES;" | Where-Object {
+        $_ -notin @("information_schema", "performance_schema", "mysql", "sys")
+    }
+
+    foreach ($db in $databases) {
+        Write-LogInfo "Fazendo backup do banco: $db"
+        $DumpFile = Join-Path $BackupDir "$db.sql"
+
+        Run-MySQLDump -Database $db | Out-File -Encoding utf8 -FilePath $DumpFile
+
+        if (Test-Path $DumpFile) {
+            Generate-Checksum -FilePath $DumpFile
+        } else {
+            Write-LogWarn "Dump falhou para banco: $db"
+        }
+    }
+
+    if ($Compress -match '^(s|sim)$') {
+        if (-not (Test-CompressionDependencies)) { return }
+
+        $Archive = "$BackupDir.tar.bz2"
+        Write-LogInfo "Compactando backup em: $Archive"
+        & tar.exe -cjf $Archive -C $Destination $DateNow
+        if ($?) {
+            Remove-Item -Recurse -Force $BackupDir
+            Write-LogSuccess "Backup compactado com sucesso: $Archive"
+            $BackupFinal = $Archive
+        } else {
+            Write-LogError "Erro ao compactar o backup."
+            $BackupFinal = $BackupDir
+        }
+    } else {
+        $BackupFinal = $BackupDir
+    }
+
+    Write-LogSuccess "Backup de todos os bancos finalizado."
+    Write-SubTitulo "=> Execução da opção de backup terminada"
+
+    if ($Verify -match '^(s|sim)$') {
+        Verify-BackupIntegrity -Destination $Destination -Backup $BackupFinal
+    }
+}
+
+# Função para Backup de um Database específico
+function Backup-Database {
+    param (
+        [string]$Database,
+        [string]$Destination = $DefaultBackupDir,
+        [string]$Compress = $DefaultCompress,
+        [string]$Verify = $DefaultVerify
+    )
+
+    Write-SubTitulo "=> Executando opção de backup de banco de dados"
+
+    # Validação do diretório
+    if (-not (Validate-Directory -Path $Destination)) {
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    if (-not (Test-MySQLConnection)) { 
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    $query = "SELECT SCHEMA_NAME FROM information_schema.schemata WHERE SCHEMA_NAME = '$Database';"
+    $result = Run-MySQLCommandRaw $query 2>$null
+
+    if (-not $result) {
+        Write-LogError "Banco de dados '$Database' não encontrado."
+        Write-Texto ""
+        Write-Texto "Abortando."
+        return
+    }
+
+    $DateNow = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $BackupDir = Join-Path $Destination $DateNow
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+
+    Write-LogInfo "Iniciando backup do banco: $Database"
+
+    $DumpFile = Join-Path $BackupDir "$Database.sql"
+
+    Run-MySQLDump -Database $Database | Out-File -Encoding utf8 -FilePath $DumpFile
+
+    if (Test-Path $DumpFile) {
+        Generate-Checksum -FilePath $DumpFile
+    } else {
+        Write-LogError "Dump falhou para banco: $Database"
+        return
+    }
+
+    if ($Compress -match '^(s|sim)$') {
+        if (-not (Test-CompressionDependencies)) { return }
+
+        $Archive = "$BackupDir.tar.bz2"
+        Write-LogInfo "Compactando backup em: $Archive"
+        & tar.exe -cjf $Archive -C $Destination $DateNow
+        if ($?) {
+            Remove-Item -Recurse -Force $BackupDir
+            Write-LogSuccess "Backup compactado com sucesso: $Archive"
+            $BackupFinal = $Archive
+        } else {
+            Write-LogError "Erro ao compactar o backup."
+            $BackupFinal = $BackupDir
+        }
+    } else {
+        $BackupFinal = $BackupDir
+    }
+
+    Write-LogSuccess "Backup do banco $Database finalizado."
+    Write-SubTitulo "=> Execução da opção de backup terminada"
+
+    if ($Verify -match '^(s|sim)$') {
+        Verify-BackupIntegrity -Destination $Destination -Backup $BackupFinal
+    }
+}
+
+# Função para Backup de uma tabela de um banco específico
+function Backup-Table {
+    param (
+        [string]$Database,
+        [string]$Table,
+        [string]$Destination = $DefaultBackupDir,
+        [string]$Compress = $DefaultCompress,
+        [string]$Verify = $DefaultVerify
+    )
+
+    Write-SubTitulo "=> Executando opção de backup de tabela"
+
+    # Validação do diretório
+    if (-not (Validate-Directory -Path $Destination)) {
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    if (-not (Test-MySQLConnection)) { 
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    $query = "SELECT SCHEMA_NAME FROM information_schema.schemata WHERE SCHEMA_NAME = '$Database';"
+    $result = Run-MySQLCommandRaw $query 2>$null
+
+    if (-not $result) {
+        Write-LogError "Banco de dados '$Database' não encontrado."
+        Write-Texto ""
+        Write-Texto "Abortando."
+        return
+    }
+
+    $query = "SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_SCHEMA = '$Database' AND TABLE_NAME = '$Table';"
+    $result = Run-MySQLCommandRaw $query 2>$null
+
+    if (-not $result) {
+        Write-LogError "Tabela '$Table' não encontrada no banco '$Database'."
+        Write-Texto ""
+        Write-Texto "Abortando."
+        return
+    }
+
+    $DateNow = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $BackupDir = Join-Path $Destination $DateNow
+    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+
+    Write-LogInfo "Iniciando backup da tabela: $Database.$Table"
+
+    $DumpFile = Join-Path $BackupDir "$Database.$Table.sql"
+
+    Run-MySQLDump -Database $Database -Table $Table | Out-File -Encoding utf8 -FilePath $DumpFile
+
+    if (Test-Path $DumpFile) {
+        Generate-Checksum -FilePath $DumpFile
+    } else {
+        Write-LogError "Dump falhou para tabela: $Database.$Table"
+        return
+    }
+
+    if ($Compress -match '^(s|sim)$') {
+        if (-not (Test-CompressionDependencies)) { return }
+
+        $Archive = "$BackupDir.tar.bz2"
+        Write-LogInfo "Compactando backup em: $Archive"
+        & tar.exe -cjf $Archive -C $Destination $DateNow
+        if ($?) {
+            Remove-Item -Recurse -Force $BackupDir
+            Write-LogSuccess "Backup compactado com sucesso: $Archive"
+            $BackupFinal = $Archive
+        } else {
+            Write-LogError "Erro ao compactar o backup."
+            $BackupFinal = $BackupDir
+        }
+    } else {
+        $BackupFinal = $BackupDir
+    }
+
+    Write-LogSuccess "Backup da tabela $Database.$Table finalizado."
+    Write-SubTitulo "=> Execução da opção de backup terminada"
+
+    if ($Verify -match '^(s|sim)$') {
+        Verify-BackupIntegrity -Destination $Destination -Backup $BackupFinal
+    }
+
+}
+
+# Funções para verificação de integridade de backup
+function Process-DumpAgainstDatabase {  # Função utilitária
+    param (
+        [string]$DumpFile
+    )
+
+    Write-LogInfo "Verificando dump: $DumpFile"
+
+    if ((Get-Item $DumpFile).Length -eq 0) {
+        Write-LogError "Arquivo $DumpFile está vazio!"
+        return
+    }
+
+    $LastLine = Get-Content $DumpFile | Select-Object -Last 1
+    if ($LastLine -match "Dump completed on") {
+        Write-LogSuccess "Linha final típica encontrada no dump: 'Dump completed on ...'"
+    } else {
+        Write-LogWarn "Linha final típica NÃO encontrada no dump: 'Dump completed on ...'"
+    }
+
+    $FileName = [System.IO.Path]::GetFileNameWithoutExtension($DumpFile)
+    $Parts = $FileName -split "\."
+
+    if ($Parts.Count -eq 2) {
+        # Dump de tabela
+        $dbName = $Parts[0]
+        $tableName = $Parts[1]
+
+        Write-LogInfo "Verificando se a tabela '$tableName' existe no banco '$dbName'..."
+
+        $tableExists = Run-MySQLCommandRaw "SHOW TABLES FROM $dbName LIKE '$tableName';"
+        if ($tableExists) {
+            Write-LogSuccess "Tabela '$tableName' existe no banco de dados."
+        } else {
+            Write-LogError "Tabela '$tableName' não encontrada no banco de dados."
+            return
+        }
+
+        $createCount = (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
+        if ($createCount -ge 1) {
+            Write-LogSuccess "Dump contém definição de tabela ($createCount CREATE TABLE encontrado)."
+        } else {
+            Write-LogWarn "Dump não contém definição de tabela para '$tableName'."
+        }
+
+    } else {
+        # Dump de banco completo
+        $dbName = $Parts[0]
+
+        $realTables = Run-MySQLCommandRaw "SHOW TABLES FROM $dbName;" | Measure-Object | Select-Object -ExpandProperty Count
+        $dumpTables = (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
+
+        Write-LogInfo "Tabelas no banco: $realTables"
+        Write-LogInfo "Tabelas no dump: $dumpTables"
+
+        if ($realTables -eq $dumpTables) {
+            Write-LogSuccess "Todas as tabelas foram exportadas corretamente."
+        } else {
+            Write-LogWarn "Algumas tabelas NÃO foram exportadas!"
+        }
+    }
+}
+
+function Verify-BackupIntegrity {  # Função principal
+    param (
+        [string]$Destination,
+        [string]$Backup
+    )
+
+    Write-SubTitulo "=> Executando opção de verificação de integridade"
+
+    # Validação do diretório
+    if (-not (Validate-Directory -Path $Destination)) {
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    if (-not (Test-MySQLConnection)) { 
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    # Evita duplicação de caminho
+    if ([System.IO.Path]::IsPathRooted($Backup)) {
+        $BackupPath = $Backup
+    } else {
+        $BackupPath = Join-Path $Destination $Backup
+    }
+
+    Write-LogInfo "Iniciando verificação de integridade para: $BackupPath"
+
+    if (!(Test-Path $BackupPath)) {
+        Write-LogError "Backup não encontrado: $BackupPath"
+        return
+    }
+
+    # Caso seja um único arquivo tar.bz2
+    if ($BackupPath -like "*.tar.bz2") {
+        if (-not (Test-CompressionDependencies)) { return }
+
+        $TempDir = Join-Path $env:TEMP ("backup_" + (Get-Random))
+        New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+        Write-LogInfo "Descompactando para: $TempDir"
+        & tar.exe -xjf $BackupPath -C $TempDir
+        if (!$?) {
+            Write-LogError "Falha ao descompactar: $BackupPath"
+            Remove-Item -Recurse -Force $TempDir
+            return
+        }
+
+        $SqlFiles = Get-ChildItem -Path $TempDir -Filter *.sql -Recurse
+        foreach ($SqlFile in $SqlFiles) {
+            $ChecksumFile = "$($SqlFile.FullName).sha256"
+            if (Test-Path $ChecksumFile) {
+                $ActualHash = (Get-FileHash -Path $SqlFile.FullName -Algorithm SHA256).Hash
+                $StoredHash = Get-Content $ChecksumFile | Select-Object -First 1
+                if ($ActualHash -eq $StoredHash) {
+                    Write-LogSuccess "Checksum válido: $($SqlFile.Name)"
+                } else {
+                    Write-LogError "Falha no checksum: $($SqlFile.Name)"
+                }
+            } else {
+                Write-LogWarn "Arquivo de checksum não encontrado: $ChecksumFile"
+            }
+
+            Process-DumpAgainstDatabase -DumpFile $SqlFile.FullName
+        }
+
+        Remove-Item -Recurse -Force $TempDir
+        Write-LogInfo "Diretório temporário removido: $TempDir"
+        Write-LogSuccess "Verificação de integridade finalizada para: $Backup"
+        Write-SubTitulo "=> Execução da opção de verificação de integridade terminada"
+        return
+    }
+
+    # Caso seja um diretório
+    if ((Test-Path $BackupPath) -and (Get-Item $BackupPath).PSIsContainer) {
+        # Verifica arquivos .sql (até 1 nível)
+        $SqlFiles = Get-ChildItem -Path $BackupPath -Recurse -Filter *.sql |
+            Where-Object { ($_.FullName.Split('\').Count -le ($BackupPath.Split('\').Count + 2)) }
+
+        if ($SqlFiles.Count -gt 0) {
+            foreach ($SqlFile in $SqlFiles) {
+                $ChecksumFile = "$($SqlFile.FullName).sha256"
+                if (Test-Path $ChecksumFile) {
+                    $ActualHash = (Get-FileHash -Path $SqlFile.FullName -Algorithm SHA256).Hash
+                    $StoredHash = Get-Content $ChecksumFile | Select-Object -First 1
+                    if ($ActualHash -eq $StoredHash) {
+                        Write-LogSuccess "Checksum válido: $($SqlFile.Name)"
+                    } else {
+                        Write-LogError "Falha no checksum: $($SqlFile.Name)"
+                    }
+                } else {
+                    Write-LogWarn "Arquivo de checksum não encontrado: $ChecksumFile"
+                }
+
+                Process-DumpAgainstDatabase -DumpFile $SqlFile.FullName
+            }
+
+            Write-LogSuccess "Verificação de integridade finalizada para: $Backup"
+            Write-SubTitulo "=> Execução da opção de verificação de integridade terminada"
+            return
+        }
+
+        # Se não há .sql, tenta verificar se há arquivos .tar.bz2
+        $TarFiles = Get-ChildItem -Path $BackupPath -Recurse -Filter *.tar.bz2 |
+            Where-Object { ($_.FullName.Split('\').Count -le ($BackupPath.Split('\').Count + 2)) }
+
+        if ($TarFiles.Count -eq 0) {
+            Write-LogError "Diretório de backup não contém arquivos '.sql' ou '.tar.bz2': $BackupPath"
+            Write-Texto "`nAbortando."
+            return
+        }
+
+        foreach ($tar in $TarFiles) {
+            Write-LogInfo "Verificando backup compactado: $($tar.FullName)"
+
+            $TempDir = Join-Path $env:TEMP ("backup_" + (Get-Random))
+            New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+            Write-LogInfo "Descompactando para: $TempDir"
+            & tar.exe -xjf $tar.FullName -C $TempDir
+            if (!$?) {
+                Write-LogError "Falha ao descompactar: $($tar.FullName)"
+                Remove-Item -Recurse -Force $TempDir
+                continue
+            }
+
+            $SqlFiles = Get-ChildItem -Path $TempDir -Filter *.sql -Recurse
+            foreach ($SqlFile in $SqlFiles) {
+                $ChecksumFile = "$($SqlFile.FullName).sha256"
+                if (Test-Path $ChecksumFile) {
+                    $ActualHash = (Get-FileHash -Path $SqlFile.FullName -Algorithm SHA256).Hash
+                    $StoredHash = Get-Content $ChecksumFile | Select-Object -First 1
+                    if ($ActualHash -eq $StoredHash) {
+                        Write-LogSuccess "Checksum válido: $($SqlFile.Name)"
+                    } else {
+                        Write-LogError "Falha no checksum: $($SqlFile.Name)"
+                    }
+                } else {
+                    Write-LogWarn "Arquivo de checksum não encontrado: $ChecksumFile"
+                }
+
+                Process-DumpAgainstDatabase -DumpFile $SqlFile.FullName
+            }
+
+            Remove-Item -Recurse -Force $TempDir
+            Write-LogInfo "Diretório temporário removido: $TempDir"
+        }
+
+        Write-LogSuccess "Verificação de integridade finalizada para: $Backup"
+        Write-SubTitulo "=> Execução da opção de verificação de integridade terminada"
+        return
+    }
+
+    Write-LogError "Formato de backup inválido: $Backup"
+}
+
+# Função para deletar backups
+function Delete-OldBackups {
+    param (
+        [string]$Destination = $DefaultBackupDir,
+        [int]$Days = $DefaultRetentionDays
+    )
+
+    $ExcluiuAlgo = $false
+
+    Write-SubTitulo "=> Executando opção de exclusão de backups"
+
+    # Validação do diretório
+    if (-not (Validate-Directory -Path $Destination)) {
+        Write-Texto "`nAbortando."
+        if ( $modo_argumentos -eq 1 ) {
+            exit 1  # Sai no modo não interativo
+        } else {
+            return  # Retorna ao menu no modo interativo
+        }
+    }
+
+    Write-LogInfo "Verificando backups para excluir com mais de $Days dias em: $Destination"
+
+    # Remover arquivos .tar.bz2 antigos
+    $JaInformouArq = $false
+    $Arquivos = Get-ChildItem -Path $Destination -Filter "*.tar.bz2" -File | Where-Object {
+        $_.Name -match "^\d{4}-\d{2}-\d{2}_\d{6}\.tar\.bz2$" -and
+        $_.LastWriteTime -lt (Get-Date).AddDays(-$Days)
+    }
+
+    foreach ($Arquivo in $Arquivos) {
+        if (-not $JaInformouArq) {
+            Write-LogInfo "Arquivo(s) compactado(s) '.tar.bz2' detectado(s) para exclusão..."
+            $JaInformouArq = $true
+        }
+        Write-LogInfo "Excluindo: $($Arquivo.FullName)"
+        Remove-Item -Force $Arquivo.FullName
+        $ExcluiuAlgo = $true
+    }
+
+    # Procurar diretórios no padrão de data/hora
+    $JaInformouDir = $false
+    $Diretorios = Get-ChildItem -Path $Destination -Directory | Where-Object {
+        $_.Name -match "^\d{4}-\d{2}-\d{2}_\d{6}$" -and
+        $_.LastWriteTime -lt (Get-Date).AddDays(-$Days)
+    }
+
+    foreach ($Dir in $Diretorios) {
+        $DirPath = $Dir.FullName
+
+        $ArquivosSql = Get-ChildItem -Path $DirPath -Filter "*.sql" -File
+        $ArquivosSha = Get-ChildItem -Path $DirPath -Filter "*.sha256" -File
+        $OutrosArquivos = Get-ChildItem -Path $DirPath -File | Where-Object {
+            $_.Extension -notin @(".sql", ".sha256")
+        }
+
+        $TotalBackups = $ArquivosSql.Count + $ArquivosSha.Count
+
+        if ($TotalBackups -gt 0) {
+            if (-not $JaInformouDir) {
+                Write-LogInfo "Diretório(s) com arquivo(s) '.sql' ou '.sha256' detectado(s) para exclusão..."
+                $JaInformouDir = $true
+            }
+
+            if ($OutrosArquivos.Count -eq 0) {
+                Write-LogInfo "Excluindo diretório completo: $DirPath"
+                Remove-Item -Recurse -Force $DirPath
+                $ExcluiuAlgo = $true
+            } else {
+                Write-LogWarn "Diretório '$DirPath' contém outros arquivos além de '.sql' e '.sha256'. Excluindo apenas esses..."
+
+                $TodosArquivos = @()
+                $TodosArquivos += $ArquivosSql
+                $TodosArquivos += $ArquivosSha
+
+                foreach ($f in $TodosArquivos) {
+                    Write-LogInfo "Excluindo: $($f.FullName)"
+                    Remove-Item -Force $f.FullName
+                    $ExcluiuAlgo = $true
+                }
+            }
+        } else {
+            Write-LogWarn "Diretório '$DirPath' não contém arquivos '.sql' ou '.sha256'. Nenhuma ação."
+        }
+    }
+
+    if ($ExcluiuAlgo) {
+        Write-LogSuccess "Exclusão concluída."
+    } else {
+        Write-LogInfo "Nenhum backup antigo encontrado para exclusão."
+    }
+
+    Write-SubTitulo "=> Execução da opção de exclusão de backups terminada"
+}
+
+# Checar pré-requisitos
+function Check-Prerequisites {
+    $Dependencias = @("mysqldump.exe", "mysqladmin.exe", "mysql.exe", "git.exe" ,"tar.exe", "bzip2.exe")
+    $Faltando = $false
+    $ConfirmarResp = @("s", "sim", "n", "nao")
+
+    Write-SubTitulo "=> Verificação de pré-requisitos"
+
+    # 1. Testar PATH do MySQL
+    Write-LogInfo "Verificando se o diretório do MySQL está no PATH do sistema..."
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $pathExists = $currentPath -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ieq $MySQLBinPath }
+
+    if (-not $pathExists) {
+        Write-LogWarn "Diretório '$MySQLBinPath' não encontrado no PATH do sistema."
+
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin -and -not $pathExists) {
+            Write-LogWarn "Este script precisa ser executado como administrador para adicionar o caminho ao PATH do sistema."
+            $Faltando = $true
+        }
+
+        do {
+            Write-Texto ""
+            $pergunta = "Deseja adicionar '$MySQLBinPath' ao PATH do sistema? (s/sim ou n/nao)"
+            $confirmar = Read-Host $pergunta
+            if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+
+            $confirmar = $confirmar.ToLower()
+            if ($confirmar -notin $ConfirmarResp) {
+                Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            }
+        } until ($ConfirmarResp -contains $confirmar)
+
+        Write-Texto ""
+
+        if ($confirmar -in @("s", "sim")) {
+            try {
+                # Verifica se o diretório existe antes de adicionar ao PATH do sistema
+                if (-not (Test-Path $MySQLBinPath -PathType Container)) {
+                    Write-LogError "O diretório '$MySQLBinPath' não existe. Não foi possível adicionar ao PATH."
+                    $Faltando = $true
+                } else {
+                    # Adiciona ao PATH
+                    [Environment]::SetEnvironmentVariable("Path", "$currentPath;$MySQLBinPath", "Machine")
+                    Write-LogSuccess "Diretório '$MySQLBinPath' adicionado ao PATH do sistema."
+                    # Atualiza a sessão atual para refletir a mudança do PATH
+                    $env:Path += ";$MySQLBinPath"
+                }
+            } catch {
+                Write-LogError "Falha ao adicionar '$MySQLBinPath' ao PATH. Verifique se o script está sendo executado com privilégios administrativos."
+                $Faltando = $true
+            }
+        } else {
+            Write-LogWarn "Diretório '$MySQLBinPath' não foi adicionado ao PATH."
+            $Faltando = $true
+        }
+    } else {
+        Write-LogSuccess "Diretório '$MySQLBinPath' já existe no PATH do sistema."
+    }
+
+    # 2. Testar dependências
+    Write-LogInfo "Verificando dependências do sistema..."
+    foreach ($cmd in $Dependencias) {
+        if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+            Write-LogError "Dependência '$cmd' não encontrada. Instale a versão correspondente ao seu S.O."
+            $Faltando = $true
+        } else {
+            $pathCmd = (Get-Command $cmd).Source
+            Write-LogSuccess "Dependência '$cmd' encontrada: $pathCmd"
+        }
+    }
+
+    # 3. Testar diretório padrão
+    Write-LogInfo "Verificando existência do diretório padrão: $DefaultBackupDir"
+    if (-not (Test-Path $DefaultBackupDir -PathType Container)) {
+        Write-LogWarn "Diretório padrão não encontrado!"
+        do {
+            Write-Texto ""
+            $pergunta = "Deseja criar o diretório? (s/sim ou n/nao)"
+            $confirmar = Read-Host $pergunta
+            if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+
+            $confirmar = $confirmar.ToLower()
+            if ($confirmar -notin $ConfirmarResp) {
+                Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            }
+        } until ($ConfirmarResp -contains $confirmar)
+
+        Write-Texto ""
+
+        if ($confirmar -in @("s", "sim")) {
+            New-Item -ItemType Directory -Path $DefaultBackupDir -Force | Out-Null
+            Write-LogSuccess "Diretório criado: $DefaultBackupDir"
+        } else {
+            Write-LogWarn "Diretório padrão não foi criado."
+        }
+    } else {
+        Write-LogSuccess "Diretório padrão encontrado."
+    }
+
+    # Verificar permissão de escrita
+    try {
+        $testFile = Join-Path $DefaultBackupDir ".__test"
+        New-Item -ItemType File -Path $testFile -Force | Out-Null
+        Remove-Item -Path $testFile -Force
+        Write-LogSuccess "Permissão de escrita confirmada no diretório: $DefaultBackupDir"
+    } catch {
+        Write-LogError "Sem permissão de escrita no diretório: $DefaultBackupDir"
+        $Faltando = $true
+    }
+
+    # Verificar espaço em disco
+    Write-LogInfo "Verificando espaço em disco no diretório padrão..."
+
+    try {
+        $driveLetter = [System.IO.Path]::GetPathRoot($DefaultBackupDir)
+        $driveInfo = New-Object System.IO.DriveInfo($driveLetter)
+
+        $mountPoint = $driveInfo.Name
+        $freeSpaceMB = [math]::Round($driveInfo.AvailableFreeSpace / 1MB)
+
+        Write-LogInfo "Ponto de montagem: $mountPoint"
+        Write-LogInfo "Espaço disponível: ${freeSpaceMB} MB"
+    } catch {
+        Write-LogWarn "Não foi possível determinar o espaço em disco."
+    }
+
+    # 4. Testar existência do usuário MySQL
+    $adminUser = ""
+    $adminPwd = ""
+
+    do {
+        Write-Texto ""
+        $pergunta = "Informe o login de um usuário administrador do MySQL para verificar a conta '$SGBDUsername'"
+        $adminUser = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${adminUser}" }
+
+        if (-not $adminUser) {
+            Write-LogError "Usuário administrador não pode ser vazio."
+        }
+    } until ($adminUser)
+
+    do {
+        $pergunta = "Informe a senha do usuário '$adminUser'"
+        $securePwd = Read-Host $pergunta -AsSecureString
+        $adminPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePwd)
+                )
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ********" }
+
+        if (-not $adminPwd) {
+            Write-LogError "Senha não pode ser vazia."
+        }
+    } until ($adminPwd)
+
+    Write-Texto ""
+    Write-LogInfo "Testando autenticação do usuário administrador '$adminUser'..."
+    $authOk = $false
+
+    Create-MyCnf -User $adminUser -Password $adminPwd
+    
+    try {
+        $result = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -e "SELECT 1;" 2>$null
+        if ($result) { $authOk = $true }
+    } catch {}
+
+    if (-not $authOk) {
+        Write-LogError "Falha na autenticação com o usuário '$adminUser'. Verifique login e senha."
+        Write-Texto "`nAbortando."
+        Remove-MyCnf
+        return
+    }
+    Write-LogSuccess "Autenticação com o usuário '$adminUser' realizada com sucesso."
+
+    # Verificar existência da conta $SGBDUsername
+    $userExists = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -s -N -e "SELECT User FROM mysql.user WHERE User = '$SGBDUsername';" 2>$null
+    if (-not $userExists) {
+        Write-LogWarn "Conta '$SGBDUsername' não encontrada."
+        do {
+            Write-Texto ""
+            $pergunta = "Deseja criar a conta '$SGBDUsername'? (s/sim ou n/nao)"
+            $respUser = Read-Host $pergunta
+            if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${respUser}" }
+            $respUser = $respUser.ToLower()
+            if ($respUser -notin $ConfirmarResp) {
+                Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            }
+        } until ($ConfirmarResp -contains $respUser)
+
+        Write-Texto ""
+
+        if ($respUser -in @("s", "sim")) {
+            try {
+                & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -s -N -e "
+                    CREATE USER '$SGBDUsername'@'localhost' IDENTIFIED BY '$SGBDPassword';
+                    GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, ALTER ROUTINE, EXECUTE, PROCESS, RELOAD, REPLICATION CLIENT ON *.* TO '$SGBDUsername'@'localhost';
+                    FLUSH PRIVILEGES;" 2>$null
+
+                Write-LogSuccess "Conta '$SGBDUsername' criada com as permissões necessárias."
+            } catch {
+                Write-LogError "Falha ao criar a conta '$SGBDUsername'."
+                $Faltando = $true
+            }
+        } else {
+            Write-LogWarn "Conta MySQL '$SGBDUsername' não foi criada."
+            $Faltando = $true
+        }
+    } else {
+        Write-LogSuccess "Conta '$SGBDUsername' já existe."
+    }
+
+    Remove-MyCnf
+
+    # 5. Resultado final
+    if ($Faltando) {
+        Write-LogError "Um ou mais pré-requisitos não foram atendidos."
+    } else {
+        Write-LogSuccess "Todos os pré-requisitos foram verificados com sucesso."
+    }
+}
+
+# Coleta informações de versão do Mysql
+function Get-MySQLVersion {
+    param (
+        [string]$User,
+        [string]$Password
+    )
+
+    try {
+        $version = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort --version 2>$null
+        Write-Subtitulo "  Versão do MySQL/MariaDB: $version"
+    } catch {
+        Write-LogError "Erro ao obter versão do MySQL/MariaDB."
+    }
+}
+
+# Lista Banco de Dados e seus tamanhos
+function List-DatabasesInfo {
+    param (
+        [string]$User,
+        [string]$Password
+    )
+
+    Write-Subtitulo "  Bases de dados existentes com seus tamanhos:"
+
+    $query = @"
+SELECT table_schema AS 'Database',
+       ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'Size_MB'
+FROM information_schema.tables
+GROUP BY table_schema;
+"@
+
+    try {
+        $result = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -e $query -s -N 2>$null
+        if ($result) {
+            Write-Texto ("{0,-30} | {1,15}" -f "Database", "Tamanho (MB)")
+            Write-Texto ("-"*48)
+            $result -split "`n" | ForEach-Object {
+                $fields = $_ -split "\s+"
+                Write-Texto ("{0,-30} | {1,15}" -f $fields[0], $fields[1])
+            }
+            Write-Texto ("-"*48)
+        }
+    } catch {
+        Write-LogError "Erro ao listar bases de dados."
+    }
+}
+
+# Lista de usuários
+function List-UsersInfo {
+    param (
+        [string]$User,
+        [string]$Password
+    )
+
+    Write-Subtitulo "  Usuários e hosts no MySQL/MariaDB:"
+
+    $query = "SELECT user, host FROM mysql.user;"
+
+    try {
+        $result = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -e $query -s -N 2>$null
+        if ($result) {
+            Write-Texto ("{0,-30} | {1,15}" -f "Usuário", "Host")
+            Write-Texto ("-"*48)
+            $result -split "`n" | ForEach-Object {
+                $fields = $_ -split "\s+"
+                Write-Texto ("{0,-30} | {1,15}" -f $fields[0], $fields[1])
+            }
+            Write-Texto ("-"*48)
+        }
+    } catch {
+        Write-LogError "Erro ao listar usuários e hosts."
+    }
+}
+
+# Lista privilégios dos usuários
+function List-UsersPrivileges {
+    param (
+        [string]$User,
+        [string]$Password
+    )
+
+    Write-Subtitulo "  Privilégios dos usuários:"
+
+    $query = @"
+SELECT grantee, table_catalog, privilege_type, is_grantable
+FROM information_schema.user_privileges;
+"@
+
+    try {
+        $result = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -e $query -s -N 2>$null
+        if ($result) {
+            Write-Texto ("{0,-40} | {1,-20} | {2,-30} | {3,-15}" -f "Usuário/Entidade", "Catálogo", "Tipo de Privilégio", "É concedida")
+            Write-Texto ("-"*110)
+            $result -split "`n" | ForEach-Object {
+                $fields = $_ -split "\s+"
+                Write-Texto ("{0,-40} | {1,-20} | {2,-30} | {3,-15}" -f $fields[0], $fields[1], $fields[2], $fields[3])
+            }
+            Write-Texto ("-"*110)
+        }
+    } catch {
+        Write-LogError "Erro ao listar privilégios."
+    }
+}
+
+# Função para traduzir o escopo para forma mais amigável (usada por "List-UsersDbPrivileges")
+function Traduz-Scope {
+    param([string]$RawScope)
+
+    # Remove aspas invertidas
+    $scope = $RawScope -replace '`', '"'
+
+    if ($scope -eq '*.*') {
+        return "TODOS OS BANCOS E TABELAS"
+    }
+    elseif ($scope -match '^(.+)\.\*$') {
+        # Exemplo: performance_schema.*
+        return "TODAS AS TABELAS DO BANCO $($matches[1])"
+    }
+    elseif ($scope -match '^(.+)\.(.+)$') {
+        # Exemplo: mysql.user
+        return "TODA A TABELA $($matches[2]) DO BANCO $($matches[1])"
+    }
+    else {
+        return $RawScope
+    }
+}
+
+# Permissões dos usuários nos banco de dados
+function List-UsersDbPrivileges {
+    Write-Subtitulo "  Privilégios dos usuários em banco de dados:"
+
+    $MaxUser = 20
+    $MaxHost = 20
+    $MaxPrivs = 50
+    $MaxScope = 40
+
+    $header = "{0,-$($MaxUser)} | {1,-$MaxHost} | {2,-$($MaxPrivs)} | {3,-$MaxScope}" -f "Usuário", "Host", "Privilégios", "Escopo"
+    Write-Texto $header
+    Write-Texto ('-' * 140)
+
+    $users = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -N -e "SELECT CONCAT(user, '|', host) FROM mysql.user;"
+
+    foreach ($userhost in $users) {
+        $parts = $userhost -split '\|'
+        if ($parts.Count -ne 2) { continue }
+
+        $user = $parts[0].Trim()
+        $user_host = $parts[1].Trim()
+
+        $grants = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -N -e "SHOW GRANTS FOR '$user'@'$user_host';"
+
+        foreach ($grant_line in $grants) {
+            if ($grant_line -match "^GRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s.*$") {
+                $privs_raw = $matches[1]
+                $scope_raw = $matches[2]
+            } else {
+                $privs_raw = "N/A"
+                $scope_raw = "N/A"
+            }
+
+            $scope_traduzido = Traduz-Scope $scope_raw
+            $scope_final = "$scope_traduzido ($scope_raw)"
+
+            # Quebrar privilégios por vírgulas
+            $privs_list = $privs_raw -split ',\s*'
+            $privs_lines = @()
+            $line = ""
+            foreach ($p in $privs_list) {
+                if (($line.Length + $p.Length + 2) -gt $MaxPrivs) {
+                    $privs_lines += $line.TrimEnd(", ")
+                    $line = ""
+                }
+                $line += "$p, "
+            }
+            if ($line) { $privs_lines += $line.TrimEnd(", ") }
+
+            # Quebrar escopo por palavras
+            $scope_words = $scope_final -split '\s+'
+            $scope_lines = @()
+            $line = ""
+            foreach ($word in $scope_words) {
+                if (($line.Length + $word.Length + 1) -gt $MaxScope) {
+                    $scope_lines += $line.Trim()
+                    $line = ""
+                }
+                $line += "$word "
+            }
+            if ($line) { $scope_lines += $line.Trim() }
+
+            $max_lines = [Math]::Max($privs_lines.Count, $scope_lines.Count)
+
+            for ($i = 0; $i -lt $max_lines; $i++) {
+                $priv = if ($i -lt $privs_lines.Count) { $privs_lines[$i] } else { "" }
+                $sc = if ($i -lt $scope_lines.Count) { $scope_lines[$i] } else { "" }
+
+                if ($i -eq 0) {
+                    $line = "{0,-$MaxUser} | {1,-$MaxHost} | {2,-$MaxPrivs} | {3,-$MaxScope}" -f $user, $user_host, $priv, $sc
+                } else {
+                    $line = "{0,-$MaxUser} | {1,-$MaxHost} | {2,-$MaxPrivs} | {3,-$MaxScope}" -f "", "", $priv, $sc
+                }
+                Write-Texto $line
+            }
+        }
+    }
+    Write-Texto ('-' * 140)
+}
+
+# Função principal de Coleta de informações básicas do Mysql/Mariadb
+function Check-MySQLInfo {
+    Write-LogInfo "Coletando informações do MySQL/MariaDB..."
+    Write-Texto ""
+
+    do {
+        $pergunta = "Informe o login de um usuário administrador do MySQL"
+        $adminUser = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${adminUser}" }
+        if (-not $adminUser) { Write-LogError "Usuário administrador não pode ser vazio." }
+    } until ($adminUser)
+
+    do {
+        $pergunta = "Informe a senha do usuário '$adminUser'"
+        $securePwd = Read-Host $pergunta -AsSecureString
+        $adminPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePwd)
+                    )
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ********" }
+        if (-not $adminPwd) { Write-LogError "Senha não pode ser vazia." }
+    } until ($adminPwd)
+
+    Write-Texto ""
+    Write-LogInfo "Testando autenticação do usuário administrador '$adminUser'..."
+
+    Create-MyCnf -User $adminUser -Password $adminPwd
+
+    try {
+        $test = & mysql.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort -e "SELECT 1;" 2>$null
+        if (-not $test) { throw }
+        Write-LogSuccess "Autenticação com o usuário '$adminUser' realizada com sucesso."
+    } catch {
+        Write-LogError "Falha na conexão com o MySQL. Verifique login, senha e parâmetros."
+        Remove-MyCnf
+        return
+    }
+
+    # Chama funções auxiliares
+    Write-Texto ""
+    Get-MySQLVersion
+    Write-Texto ""
+    List-DatabasesInfo
+    Write-Texto ""
+    List-UsersInfo
+    Write-Texto ""
+    List-UsersPrivileges
+    Write-Texto ""
+    List-UsersDbPrivileges
+    Write-Texto ""
+
+    # Informações adicionais: uptime e conexões
+    try {
+        $status = & mysqladmin.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort status 2>$null
+
+        if ($status) {
+            # Extrair Uptime
+            if ($status -match "Uptime: (\d+)") {
+                $uptime = [int]$matches[1]
+                $days = [math]::Floor($uptime / 86400)
+                $hours = [math]::Floor(($uptime % 86400) / 3600)
+                $mins = [math]::Floor(($uptime % 3600) / 60)
+                $secs = $uptime % 60
+                $uptime_fmt = "{0}d {1:00}:{2:00}:{3:00}" -f $days, $hours, $mins, $secs
+
+                Write-Subtitulo "  Tempo de atividade do MySQL/MariaDB (Uptime): $uptime_fmt"
+                Write-Texto ""
+            }
+
+            # Extrair número de conexões ativas (Threads)
+            if ($status -match "Threads: (\d+)") {
+                $connections = $matches[1]
+                Write-Subtitulo "  Conexões ativas: $connections"
+            }
+        } else {
+            Write-LogWarn "Não foi possível obter informações via mysqladmin status."
+        }
+    } catch {
+        Write-LogError "Erro ao coletar informações adicionais via mysqladmin."
+    }
+    Remove-MyCnf
+}
+# =================================================================================
+
+#  3. ============================== MODO INTERATIVO ==============================
+function Show-Menu {
+    Clear-Host
+    Start-Sleep -Milliseconds 200
+    Write-Titulo "                         ========== MENU DE BACKUP MYSQL/MARIADB ==========                         "
+    Write-Texto "Data da última revisão: $ScriptRevision"
+    Write-Texto "Versão: $ScriptVersion"
+    Write-Texto ""
+    Write-Texto "Escolha uma opção:"
+    Write-Texto "  [  1 ] Backup de todos os Banco de Dados"
+    Write-Texto "  [  2 ] Backup de um Banco de Dados específico"
+    Write-Texto "  [  3 ] Backup de uma Tabela de um Banco de Dados"
+    Write-Texto "  [  4 ] Verificar integridade de um backup"
+    Write-Texto "  [  5 ] Excluir backups antigos"
+    Write-Texto "  [  6 ] Checar pré-requisitos deste script"
+    Write-Texto "  [  7 ] Informações sobre o SGBD do servidor"
+
+    if ($Global:LogDebug) {
+        Write-Texto "  [  8 ] Desativar log (debug)"
+    } else {
+        Write-Texto "  [  8 ] Ativar log (debug)"
+    }
+
+    Write-Texto "  [  9 ] Ver ajuda"
+    Write-Texto "  [ 10 ] Sair"
+    Write-Texto ""
+}
+
+function Menu-Interativo {
+    while ($true) {
+        Show-Menu
+        $pergunta = "Digite sua escolha [1-10]"
+        $opcao = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${opcao}" }
+        Write-Texto ""
+
+        switch ($opcao) {
+            '1' { Opcao-Menu-BackupTodos }
+            '2' { Opcao-Menu-BackupBanco }
+            '3' { Opcao-Menu-BackupTabela }
+            '4' { Opcao-Menu-Integridade }
+            '5' { Opcao-Menu-Excluir }
+            '6' { Opcao-Menu-Requisitos }
+            '7' { Opcao-Menu-MySQLInfo }
+            '8' { Opcao-Menu-Debug }
+            '9' { Opcao-Menu-Ajuda }
+            '10' {
+                Write-Texto ""
+                Write-Texto "Saindo..."
+                exit
+            }
+            default {
+                Write-Texto ""
+                Write-Texto "Opção inválida. Tente novamente."
+                Start-Sleep -Seconds 1
+                continue
+            }
+        }
+
+        Write-Texto ""
+        $pergunta = "Pressione Enter para voltar ao menu..."
+        Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}" }
+        Write-Texto ""
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+# Função interativa da opção 1 - Backup de todos os bancos de dados
+function Opcao-Menu-BackupTodos {
+    $pergunta = "Informe o diretório de destino (Enter para padrão [$DefaultBackupDir])"
+    $dir = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${dir}" }
+    $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
+
+    do {
+        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $confirmar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+        $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
+
+        if ($confirmar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $confirmar = ""
+        }
+    } while (-not $confirmar)
+
+    $compactar = $confirmar
+
+    do {
+        $pergunta = "Deseja verificar a integridade do backup após a execução? (s/sim ou n/nao) [$DefaultVerify]"
+        $verificar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${verificar}" }
+        $verificar = if ([string]::IsNullOrWhiteSpace($verificar)) { $DefaultVerify } else { $verificar.ToLower() }
+
+        if ($verificar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $verificar = ""
+        }
+    } while (-not $verificar)
+
+    Write-Texto ""
+
+    Backup-AllDatabases -Destination $dir -Compress $compactar -Verify $verificar
+}
+
+# Função interativa da opção 2 - Backup de Banco Específico
+function Opcao-Menu-BackupBanco {
+    do {
+        $pergunta = "Informe o nome do banco de dados"
+        $db = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${db}" }
+        if ([string]::IsNullOrWhiteSpace($db)) {
+            Write-LogWarn "O nome do banco de dados não pode ser vazio."
+        }
+    } while ([string]::IsNullOrWhiteSpace($db))
+
+    $pergunta = "Informe o diretório de destino (Enter para padrão [$DefaultBackupDir])"
+    $dir = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${dir}" }
+    $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
+
+    do {
+        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $confirmar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+        $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
+
+        if ($confirmar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $confirmar = ""
+        }
+    } while (-not $confirmar)
+
+    $compactar = $confirmar
+
+    do {
+        $pergunta = "Deseja verificar a integridade do backup após a execução? (s/sim ou n/nao) [$DefaultVerify]"
+        $verificar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${verificar}" }
+        $verificar = if ([string]::IsNullOrWhiteSpace($verificar)) { $DefaultVerify } else { $verificar.ToLower() }
+
+        if ($verificar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $verificar = ""
+        }
+    } while (-not $verificar)
+
+    Write-Texto ""
+
+    Backup-Database -Database $db -Destination $dir -Compress $compactar -Verify $verificar
+}
+
+# Função interativa da opção 3 - Backup de Tabela
+function Opcao-Menu-BackupTabela {
+    do {
+        $pergunta = "Informe o nome do banco de dados"
+        $db = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${db}" }
+        if ([string]::IsNullOrWhiteSpace($db)) {
+            Write-LogWarn "O nome do banco de dados não pode ser vazio."
+        }
+    } while ([string]::IsNullOrWhiteSpace($db))
+
+    do {
+        $pergunta = "Informe o nome da tabela"
+        $tbl = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${tbl}" }
+        if ([string]::IsNullOrWhiteSpace($tbl)) {
+            Write-LogWarn "O nome da tabela não pode ser vazio."
+        }
+    } while ([string]::IsNullOrWhiteSpace($tbl))
+
+    $pergunta = "Informe o diretório de destino (Enter para padrão [$DefaultBackupDir])"
+    $dir = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${dir}" }
+    $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
+
+    do {
+        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $confirmar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+        $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
+
+        if ($confirmar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $confirmar = ""
+        }
+    } while (-not $confirmar)
+
+    $compactar = $confirmar
+
+    do {
+        $pergunta = "Deseja verificar a integridade do backup após a execução? (s/sim ou n/nao) [$DefaultVerify]"
+        $verificar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${verificar}" }
+        $verificar = if ([string]::IsNullOrWhiteSpace($verificar)) { $DefaultVerify } else { $verificar.ToLower() }
+
+        if ($verificar -notmatch '^(s|sim|n|nao)$') {
+            Write-LogError "Resposta inválida. Digite 's/sim' ou 'n/nao'."
+            $verificar = ""
+        }
+    } while (-not $verificar)
+
+    Write-Texto ""
+
+    Backup-Table -Database $db -Table $tbl -Destination $dir -Compress $compactar -Verify $verificar
+}
+
+# Função interativa da opção 4 - Verificação de Integridade
+function Opcao-Menu-Integridade {
+    $pergunta = "Informe o diretório raiz do backup (Enter para padrão [$DefaultBackupDir])"
+    $destino = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${destino}" }
+    $destino = if ([string]::IsNullOrWhiteSpace($destino)) { $DefaultBackupDir } else { $destino }
+
+    do {
+        $pergunta = "Informe o nome do arquivo (tar.bz2) ou diretório com o(s) dump(s) '.sql'"
+        $backup = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${backup}" }
+        if ([string]::IsNullOrWhiteSpace($backup)) {
+            Write-LogWarn "O nome não pode ser vazio."
+        }
+    } while ([string]::IsNullOrWhiteSpace($backup))
+
+    Write-Texto ""
+
+    Verify-BackupIntegrity -Destination $destino -Backup $backup
+}
+
+# Função interativa da opção 5 - Exclusão de backups
+function Opcao-Menu-Excluir {
+    $pergunta = "Informe o diretório para busca dos backups (Enter para padrão [$DefaultBackupDir])"
+    $destino = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${destino}" }
+    $destino = if ([string]::IsNullOrWhiteSpace($destino)) { $DefaultBackupDir } else { $destino }
+
+    # Validação da quantidade de dias
+    do {
+        $pergunta = "Excluir backups com mais de quantos dias? (Enter para padrão [$DefaultRetentionDays])"
+        $dias = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${dias}" }
+        $dias = if ([string]::IsNullOrWhiteSpace($dias)) { $DefaultRetentionDays } else { $dias }
+
+        if ($dias -notmatch '^\d+$') {
+            Write-LogError "Valor inválido. Digite apenas números inteiros positivos."
+            $dias = ""
+        }
+    } while (-not $dias)
+
+    # Confirmação
+    do {
+        $pergunta = "Tem certeza que deseja excluir os backups com mais de $dias dias? (Responda com sim ou nao)"
+        $confirmar = Read-Host $pergunta
+        if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
+        $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { "" } else { $confirmar.ToLower() }
+
+        if ($confirmar -notmatch '^(sim|nao)$') {
+            Write-LogError "Resposta inválida. Digite exatamente 'sim' ou 'nao'."
+            $confirmar = ""
+        }
+    } while (-not $confirmar)
+
+    Write-Texto ""
+
+    if ($confirmar -eq 'sim') {
+        Delete-OldBackups -Destination $destino -Days $dias
+    } else {
+        Write-LogWarn "Exclusão de backups antigos cancelada pelo usuário."
+    }
+}
+
+# Função interativa da opção 6 - Verificar pré-requisitos
+function Opcao-Menu-Requisitos {
+    Check-Prerequisites
+}
+# Função interativa da opção 7 - Verificar informações do Mysql
+function Opcao-Menu-MySQLInfo {
+    Check-MySQLInfo
+}
+
+# Função interativa da opção 8 - Habilitar/Desabilitar Log
+function Opcao-Menu-Debug {
+    $acao = if ($Global:LogDebug) { "desativar" } else { "ativar" }
+    $sugestao = "nao"
+
+    $pergunta = "Deseja realmente $acao o log (debug)? (s/sim ou n/nao) [$sugestao]"
+    $confirma = Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirma}" }
+    $confirma = if ([string]::IsNullOrWhiteSpace($confirma)) { $sugestao } else { $confirma.ToLower() }
+
+    Write-Texto ""
+
+    if ($confirma -match '^(s|sim)$') {
+        # Alterna o estado e persiste globalmente
+        $Global:LogDebug = -not $Global:LogDebug
+
+        if ($Global:LogDebug) {
+            Write-LogInfo "O Log (debug) foi ativado."
+        } else {
+            Write-LogInfo "O Log (debug) foi desativado."
+        }
+
+        Start-Sleep -Seconds 1
+    } else {
+        Write-Host "Operação cancelada."
+    }
+}
+
+# Função interativa da opção 9 - Ajuda
+function Opcao-Menu-Ajuda {
+    Clear-Host
+    Start-Sleep -Milliseconds 200
+    Write-SubTitulo "                                 ========== MENU DE AJUDA ==========                                "
+    Show-Ajuda
+    Write-Host ""
+    Write-Host ("=" * 100) -ForegroundColor Cyan
+    Write-Texto ""
+    $pergunta = "Pressione Enter para voltar ao menu..."
+    Read-Host $pergunta
+    if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}" }
+    Write-Texto ""
+    Menu-Interativo
+}
+
+function Show-Ajuda {
+    Write-Host ""
+    Write-Host "Uso: $($MyInvocation.ScriptName.Split('\')[-1]) [-a] [-d <database>] [-t <tabela>] [-o <diretório_destino>] [-c] [-l] [-r <dias>] [-v] [-h] [-C] [-i]" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Opções:" -ForegroundColor Yellow
+    Write-Host "  <nenhuma>                 Entra no modo interativo"
+    Write-Host "  -a, --all                 Backup de todos os bancos de dados"
+    Write-Host "  -d, --database <nome>     Backup de um banco de dados específico"
+    Write-Host "  -t, --table <tabela>      Backup de uma tabela específica"
+    Write-Host "                            Requer também -d <database>"
+    Write-Host ""
+    Write-Host "  -o, --output <diretório>  Diretório de destino do backup"
+    Write-Host "                            Opcional com '-a/--all', '-d/--database' e '-t/--table'."
+    Write-Host "                            Obrigatório com '-r/--remove' e '-v/--verify'."
+    Write-Host ""
+    Write-Host "  -c, --compress            Compactar backup em formato .tar.bz2"
+    Write-Host "  -r, --remove <dias>       Remove backups com mais de <dias> dias"
+    Write-Host "                            Requer '-o/--output' especificado."
+    Write-Host ""
+    Write-Host "  -v, --verify              Verifica a integridade de um backup"
+    Write-Host "                            Quando usado isoladamente (sem '-a' ou '-d'),"
+    Write-Host "                            exige '-o/--output <diretório ou arquivo .tar.bz2>' "
+    Write-Host "                            para localizar o backup a ser verificado."
+    Write-Host "                            Se combinado com '-a' ou '-d', a verificação"
+    Write-Host "                            será feita automaticamente após o backup."
+    Write-Host ""
+    Write-Host "  -i, --mysql-info          Exibe informações sobre o MySQL/MariaDB"
+    Write-Host "                            Necessário autenticar com usuário administrador."
+    Write-Host "  -k, --check               Checar dependências deste script."
+    Write-Host "  -l, --log                 Habilita o log (debug)"
+    Write-Host "  -h, --help                Exibe esta ajuda"
+    Write-Host ""
+    Write-Host "Exemplos práticos:" -ForegroundColor Yellow
+    Write-Host "  -> Backup de todos os bancos, com compactação e verificação:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -a -c -v"
+    Write-Host "  -> Backup de um banco específico com log:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -o C:\Backup\BancoDados -l"
+    Write-Host "  -> Backup de uma tabela:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -t mytable -o C:\Backup\BancoDados"
+    Write-Host "  -> Remover backups com mais de 30 dias:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -r 30 -o C:\Backup\BancoDados"
+    Write-Host "  -> Verificar integridade de backup em diretório:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o C:\Backup\BancoDados\2025-05-24_095744"
+    Write-Host "  -> Verificar integridade de backup compactado:"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o C:\Backup\BancoDados\2025-05-24_095744.tar.bz2"
+    Write-Host ""
+    Write-Host (
+        "[Importante:] -> Os logs deste script, quando habilitados, são gravados em: $LogFile`n" +
+        "              -> Obtenha também as ferramentas extras instalando o Git for Windows. Acesse o site: <https://gitforwindows.org>`n" +
+        "              -> No Agendador de Tarefas do Windows, o script deverá ser acionado da seguinte forma:`n" +
+        "                 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.ScriptName)`" -arg1 -arg2 ..."
+    )   -ForegroundColor Cyan
+}
+# =================================================================================
+
+#  4. =========================== PARSING DE ARGUMENTOS ===========================
+# Variáveis do Parsing
+$modo_argumentos = 0
+$arg_tipo = ""
+$arg_banco = ""
+$arg_tabela = ""
+$arg_destino = ""
+$arg_compress = ""
+$arg_retencao_dias = ""
+$arg_verify = "nao"
+$arg_check = ""
+$arg_mysqlinfo = ""
+
+# Function to parse arguments
+function Parse-Args {
+    param($Arguments)
+
+    $usou_all = 0
+    $usou_database = 0
+    $usou_tabela = 0
+    $usou_output = 0
+    $usou_compress = 0
+    $usou_remove = 0
+    $usou_log = 0
+    $usou_verify = 0
+    $usou_check = 0
+    $usou_mysqlinfo = 0
+
+    $script:modo_argumentos = 0
+    $script:arg_tipo = ""
+    $script:arg_banco = ""
+    $script:arg_tabela = ""
+    $script:arg_destino = ""
+    $script:arg_compress = ""
+    $script:arg_retencao_dias = ""
+    $script:arg_verify = "nao"
+    $script:arg_check = ""
+    $script:arg_mysqlinfo = ""
+
+    $i = 0
+    while ($i -lt $Arguments.Count) {
+        switch ($Arguments[$i]) {
+            { $_ -in "-a", "--all" } {
+                if ($usou_all -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -a/--all não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_tipo = "1"
+                $script:modo_argumentos = 1
+                $usou_all = 1
+            }
+
+            { $_ -in "-d", "--database" } {
+                if ($usou_database -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -d/--database não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $i++
+                if ($i -ge $Arguments.Count -or ([string]$Arguments[$i]).StartsWith("-")) {
+                    Write-Texto ""
+                    Write-LogError "Nome do banco não especificado após -d/--database."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_banco = $Arguments[$i]
+                $script:modo_argumentos = 1
+                $usou_database = 1
+            }
+
+            { $_ -in "-t", "--table" } {
+                if ($usou_tabela -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -t/--table não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $i++
+                if ($i -ge $Arguments.Count -or ([string]$Arguments[$i]).StartsWith("-")) {
+                    Write-Texto ""
+                    Write-LogError "Nome da tabela não especificado após -t/--table."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_tabela = $Arguments[$i]
+                $script:modo_argumentos = 1
+                $usou_tabela = 1
+            }
+
+            { $_ -in "-o", "--output" } {
+                if ($usou_output -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -o/--output não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $i++
+                if ($i -ge $Arguments.Count -or ([string]$Arguments[$i]).StartsWith("-")) {
+                    Write-Texto ""
+                    Write-LogError "Diretório de destino não especificado após -o/--output."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_destino = $Arguments[$i]
+                $usou_output = 1
+            }
+
+            { $_ -in "-c", "--compress" } {
+                if ($usou_compress -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -c/--compress não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_compress = "sim"
+                $usou_compress = 1
+            }
+
+            { $_ -in "-r", "--remove" } {
+                if ($usou_remove -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -r/--remove não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $i++
+                if ($i -ge $Arguments.Count -or ([string]$Arguments[$i]).StartsWith("-")) {
+                    Write-Texto ""
+                    Write-LogError "Dias de retenção não especificado após -r/--remove."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                if (-not ($Arguments[$i] -match '^[0-9]+$')) {
+                    Write-Texto ""
+                    Write-LogError "Dias de retenção '-r/--remove <dias>' deve ser um número inteiro positivo."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_retencao_dias = $Arguments[$i]
+                $script:modo_argumentos = 1
+                $usou_remove = 1
+            }
+
+            { $_ -in "-v", "--verify" } {
+                if ($usou_verify -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -v/--verify não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:arg_verify = "sim"
+                $script:modo_argumentos = 1
+                $usou_verify = 1
+            }
+
+            { $_ -in "-k", "--check" } {
+                if ($usou_check -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -k/--check não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:modo_argumentos = 1
+                $script:arg_check = 1
+                $usou_check = 1
+            }
+
+            { $_ -in "-i", "--mysql-info" } {
+                if ($usou_mysqlinfo -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -i/--mysql-info não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                $script:modo_argumentos = 1
+                $script:arg_mysqlinfo = 1
+                $usou_mysqlinfo = 1
+            }
+
+            { $_ -in "-l", "--log" } {
+                if ($usou_log -eq 1) {
+                    Write-Texto ""
+                    Write-LogError "A opção -l/--log não pode ser informada mais de uma vez."
+                    Write-Texto "`nAbortando."
+                    exit 1
+                }
+                if ($Global:LogDebug -eq $false) {
+                    $Global:LogDebug = $true
+                }
+                $usou_log = 1
+            }
+
+            { $_ -in "-h", "--help" } {
+                Show-Ajuda
+                Write-Texto ""
+                exit 0
+            }
+
+            default {
+                Write-Texto ""
+                Write-LogError "Opção desconhecida: $($_) (Use -h para ajuda.)"
+                Write-Texto "`nAbortando."
+                exit 1
+            }
+        }
+        $i++
+    }
+
+    # Regras de consistência
+    # Proibição de combinação -a e -d
+    if ($usou_all -eq 1 -and $usou_database -eq 1) {
+        Write-Texto ""
+        Write-LogError "As opções -a/--all e -d/--database não podem ser usadas simultaneamente."
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação -t exige -d
+    if ($usou_tabela -eq 1 -and $usou_database -eq 0) {
+        Write-Texto ""
+        Write-LogError "A opção -t/--table requer que -d/--database seja informado."
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação -o
+    if ($usou_output -eq 1 -and $modo_argumentos -eq 0) {
+        Write-Texto ""
+        Write-LogError "A opção -o/--output requer outros argumentos. (Use -h para ajuda.)"
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação: -c
+    if ($usou_compress -eq 1 -and $modo_argumentos -eq 0) {
+        Write-Texto ""
+        Write-LogError "A opção -c/--compress requer -a/--all ou -d/--database ou -t/--table."
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação: -r
+    if ($usou_remove -eq 1 -and $usou_output -eq 0) {
+        Write-Texto ""
+        Write-LogError "A opção -r/--remove requer -o/--output."
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação: -v
+    if ($usou_verify -eq 1 -and $usou_output -eq 0 -and $usou_all -eq 0 -and $usou_database -eq 0) {
+        Write-Texto ""
+        Write-LogError "A opção -v/--verify, quando sozinha, requer -o/--output."
+        Write-Texto "`nAbortando."
+        exit 1
+    }
+
+    # Validação: -k
+    if ($usou_check -eq 1) {
+        $total_args = $usou_all + $usou_database + $usou_tabela + $usou_output + $usou_compress + $usou_remove + $usou_verify + $usou_mysqlinfo + $usou_check
+        if ($total_args -gt 1) {
+            Write-Texto ""
+            Write-LogError "A opção -k/--check deve ser usada sozinha, sem outras opções."
+            Write-Texto "`nAbortando."
+            exit 1
+        }
+    }
+
+    # Validação: -i
+    if ($usou_mysqlinfo -eq 1) {
+        $total_args = $usou_all + $usou_database + $usou_tabela + $usou_output + $usou_compress + $usou_remove + $usou_verify + $usou_check + $usou_mysqlinfo
+        if ($total_args -gt 1) {
+            Write-Texto ""
+            Write-LogError "A opção -i/--mysql-info deve ser usada sozinha, sem outras opções."
+            Write-Texto "`nAbortando."
+            exit 1
+        }
+    }
+
+    # Atribuindo arg_tipo conforme passagem de argumentos
+    if ($usou_tabela -eq 1) {
+        $script:arg_tipo = "3"  # 3 = table dump
+    }
+    elseif ($usou_database -eq 1) {
+        $script:arg_tipo = "2"  # 2 = database dump
+    }
+    elseif ($usou_all -eq 1) {
+        $script:arg_tipo = "1"  # 1 = all databases dump
+    }
+    else {
+        $script:arg_tipo = ""
+    }
+
+    # Default values
+    $script:arg_destino = if ($arg_destino) { $arg_destino } else { $DefaultBackupDir }
+    $script:arg_compress = if ($arg_compress) { $arg_compress } else { $DefaultCompress }
+}
+# =================================================================================
+
+#  5. =========================== EXECUÇÃO PRINCIPAL ===========================
+# Parse arguments
+Parse-Args $args
+
+# Rotaciona o log se o debug estiver ativado
+if ($Global:LogDebug) {
+    Rotate-LogFile
+}
+
+Write-Texto ""
+Write-Texto "===== Execução iniciada em $(Get-Date -Format 'dd/MMM/yyyy:HH:mm:ss zzz') ====="
+
+# Modo não interativo
+if ($modo_argumentos -eq 1) {
+    Write-LogWarn "Executando em modo não interativo."
+
+    if ($usou_log -eq 1) {
+        Write-LogInfo "Opção -l/--log informada. O log está ativado." # Verifica se -l/--log foi passado como argumento e informa
+    }
+
+    # Executa a verificação dos requisitos se informado o argumento
+    if ($arg_check) {
+        Check-Prerequisites
+        exit 0
+    }
+
+    # Mostra Informações sobre o Mysql
+    if ($arg_mysqlinfo) {
+        Check-MySQLInfo
+        exit 0
+    }
+
+    # Alerta se -o/--output não foi passado como argumento
+    if ($usou_output -eq 0) {
+        Log-Warn "Opção -o/--output não informada, usando destino padrão: $DefaultBackupDir"
+    }
+
+    # Executa a função de backup a depender do argumento
+    if ($arg_tipo -eq "1") {
+        Backup-AllDatabases -Destination $arg_destino -Compress $arg_compress -Verify $arg_verify
+    }
+    elseif ($arg_tipo -eq "2") {
+        Backup-Database -Database $arg_banco -Destination $arg_destino -Compress $arg_compress -Verify $arg_verify
+    }
+    elseif ($arg_tipo -eq "3") {
+        Backup-Table -Database $arg_banco -Table $arg_tabela -Destination $arg_destino -Compress $arg_compress -Verify $arg_verify
+    }
+
+    # Executa a função de exclusão de backups se informado o argumento
+    if ($arg_retencao_dias) {
+        Delete-OldBackups -Destination $arg_destino -Days $arg_retencao_dias
+    }
+
+    # Se não houver tipo de backup nem exclusão, mas tiver --verify, executa verificação isolada
+    if ($arg_verify -eq "sim" -and -not $arg_tipo -and -not $arg_retencao_dias) {
+        Verify-BackupIntegrity (Split-Path $arg_destino -Parent) (Split-Path $arg_destino -Leaf)
+    }
+
+    exit 0
+} else {
+    Menu-Interativo
+}
