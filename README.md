@@ -124,13 +124,13 @@ Os logs gerados por este script são **rotacionados automaticamente** de acordo 
 ### Execução interativa:
 
 ```bash
-sudo /usr/local/sbin/script-backup-mysql.sh
+C:\seu\caminho\para\o\script\script-backup-mysql.ps1
 ```
 
 ### Execução automática com parâmetros (exemplo):
 
 ```bash
-sudo /usr/local/sbin/script-backup-mysql.sh -a -c -r 10 -o /backup/mysql
+C:\seu\caminho\para\o\script\script-backup-mysql.ps1 -a -c -r 10 -o C:\seu\caminho\para\o\backup\
 ```
 
 > Onde:
