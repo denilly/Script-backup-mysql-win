@@ -141,6 +141,13 @@ C:\seu\caminho\para\o\script\script-backup-mysql.ps1 -a -c -r 10 -o C:\seu\camin
 > `-r` define a retenção de backups (em dias).
 > `-o` destino do backup.
 
+### Agendador de Tarefas
+
+No Agendador de Tarefas do Windows, o script deverá ser acionado da seguinte forma:
+```bash
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\seu\caminho\para\o\script\script-backup-mysql.ps1" -arg1 -arg2 ...
+```
+
 ---
 
 ## Contribuição
