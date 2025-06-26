@@ -55,7 +55,7 @@ Este script é fornecido "**como está**" e pode ser utilizado e modificado por 
 ### 1. Criar o arquivo do script
 
 ```bash
-notepad C:\backup\scripts\script-backup-mysql.ps1
+notepad C:\caminho\para\os\seus\scripts\script-backup-mysql.ps1
 ```
 
 Cole o código deste repositório no editor. Ajuste os parâmetros indicados com `<--` conforme a necessidade e salve.
