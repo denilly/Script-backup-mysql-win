@@ -60,6 +60,8 @@ notepad C:\caminho\para\os\seus\scripts\script-backup-mysql.ps1
 
 Cole o código deste repositório no editor. Ajuste os parâmetros indicados com `<--` conforme a necessidade e salve.
 
+> **💡 Importante:** Utilize sempre codificação de caracteres ANSI na criação do arquivo para a correta interpretação dos textos!
+
 ---
 
 ### 2. Conceder as permissões NTFS de controle total, como não herdadas e somente para a conta de sistema "SYSTEM", uma conta ADM Local, de domínio ou grupo específico de acordo com as suas políticas de segurança.
