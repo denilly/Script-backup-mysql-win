@@ -60,7 +60,7 @@ notepad C:\caminho\para\os\seus\scripts\script-backup-mysql.ps1
 
 Cole o código deste repositório no editor. Ajuste os parâmetros indicados com `<--` conforme a necessidade e salve.
 
-> **💡 Importante:** Utilize sempre codificação de caracteres ANSI na criação do arquivo para a correta interpretação dos textos!
+> **💡 Importante:** Utilize codificação de caracteres ANSI para Powershell 5.1 e anteriores e UTF-8 (sem Bom) para o Powershell 7 na criação do arquivo para a correta interpretação dos textos!
 
 ---
 
