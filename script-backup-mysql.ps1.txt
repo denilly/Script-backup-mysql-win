@@ -2,9 +2,11 @@
 # -----------------------------------------------------------------------------
 # Nome do arquivo de script: script-backup-mysql.ps1
 # Descrição: Script para realizar o backup/dump do banco de dados Mysql/Mariadb, 
-#            compactação e exclusão de backups antigos em ambiente MS Windows.
+#            compactação e exclusão de backups antigos, dentre outras funcionalidades, 
+#            em ambiente MS Windows (PowerShell 5.1 e 7+).
 # Autor: Denilly Carvalho do Carmo
-# Data de Criação: 25/06/2025
+# Data de Criação: 11/07/2025
+# Projeto: https://github.com/denilly/Script-backup-mysql-win
 # Copyright (c) 2025 Denilly Carvalho do Carmo. Todos os direitos reservados.
 # Licença: GNU General Public License (GPL) versão 3
 # Versão: 1.0
@@ -24,7 +26,8 @@
 #             Os parâmetros de rotação podem ser ajustados conforme a necessidade.
 #
 # COMO USAR:
-# 1. Crie o arquivo do script com o seu editor preferido:
+# 1. Crie o arquivo do script com o seu editor preferido usando codificação de caracteres ANSI
+#    (Powershell 5.1) ou UTF-8 (sem Bom) para o Powershell 7+:
 #    > notepad C:\backup\scripts\script-backup-mysql.ps1
 # 2. Cole o código deste arquivo no editor, ajustes os parâmetros comentados com "<--" (quando  
 #    necessário) e salve o arquivo.
@@ -41,7 +44,8 @@
 
 #  1. =============================== CONFIGURAÇÕES ===============================
 $ScriptVersion = '1.0'
-$ScriptRevision = '25/06/2025'
+$ScriptRevision = '11/07/2025'
+$LicencaGPL = 'GPL-3.0'
 
 # Credenciais e demais configurações do SGBD
 $SGBDUsername = "login_usuario"    # <-- Informe o usuário com acesso aos Banco de Dados
@@ -298,7 +302,7 @@ function Validate-Directory {
             return $false
         }
         return $true
-    } elseif ((Test-Path $Dir -PathType Leaf) -and ($Dir -match "\.tar\.bz2$")) {
+    } elseif ((Test-Path $Dir -PathType Leaf) -and ($Dir -match "\.tar\.zst$")) {
         try {
             Get-Content $Dir -TotalCount 1 | Out-Null
         } catch {
@@ -330,7 +334,7 @@ function Test-MySQLConnection {
 }
 
 function Test-CompressionDependencies {
-    $Dependencies = @("tar.exe", "bzip2.exe")
+    $Dependencies = @("tar.exe", "zstd.exe")
     $Faltando = $false
 
     foreach ($cmd in $Dependencies) {
@@ -403,13 +407,19 @@ function Backup-AllDatabases {
     if ($Compress -match '^(s|sim)$') {
         if (-not (Test-CompressionDependencies)) { return }
 
-        $Archive = "$BackupDir.tar.bz2"
-        Write-LogInfo "Compactando backup em: $Archive"
-        & tar.exe -cjf $Archive -C $Destination $DateNow
+        $Archive = "$BackupDir.tar"
+        $ArchiveZst = "$Archive.zst"
+        #Gerar arquivo .tar
+        Write-LogInfo "Criando arquivo .tar antes de compactar..."
+        & tar.exe -cf $Archive -C $Destination $DateNow
+        # Compactar .tar com zstd
+        Write-LogInfo "Compactando backup em: $ArchiveZst"
+        & zstd.exe -T0 -19 $Archive
         if ($?) {
+            Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
-            Write-LogSuccess "Backup compactado com sucesso: $Archive"
-            $BackupFinal = $Archive
+            Write-LogSuccess "Backup compactado com sucesso: $ArchiveZst"
+            $BackupFinal = $ArchiveZst
         } else {
             Write-LogError "Erro ao compactar o backup."
             $BackupFinal = $BackupDir
@@ -486,13 +496,19 @@ function Backup-Database {
     if ($Compress -match '^(s|sim)$') {
         if (-not (Test-CompressionDependencies)) { return }
 
-        $Archive = "$BackupDir.tar.bz2"
-        Write-LogInfo "Compactando backup em: $Archive"
-        & tar.exe -cjf $Archive -C $Destination $DateNow
+        $Archive = "$BackupDir.tar"
+        $ArchiveZst = "$Archive.zst"
+        #Gerar arquivo .tar
+        Write-LogInfo "Criando arquivo .tar antes de compactar..."
+        & tar.exe -cf $Archive -C $Destination $DateNow
+        # Compactar .tar com zstd
+        Write-LogInfo "Compactando backup em: $ArchiveZst"
+        & zstd.exe -T0 -19 $Archive
         if ($?) {
+            Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
-            Write-LogSuccess "Backup compactado com sucesso: $Archive"
-            $BackupFinal = $Archive
+            Write-LogSuccess "Backup compactado com sucesso: $ArchiveZst"
+            $BackupFinal = $ArchiveZst
         } else {
             Write-LogError "Erro ao compactar o backup."
             $BackupFinal = $BackupDir
@@ -580,13 +596,19 @@ function Backup-Table {
     if ($Compress -match '^(s|sim)$') {
         if (-not (Test-CompressionDependencies)) { return }
 
-        $Archive = "$BackupDir.tar.bz2"
-        Write-LogInfo "Compactando backup em: $Archive"
-        & tar.exe -cjf $Archive -C $Destination $DateNow
+        $Archive = "$BackupDir.tar"
+        $ArchiveZst = "$Archive.zst"
+        #Gerar arquivo .tar
+        Write-LogInfo "Criando arquivo .tar antes de compactar..."
+        & tar.exe -cf $Archive -C $Destination $DateNow
+        # Compactar .tar com zstd
+        Write-LogInfo "Compactando backup em: $ArchiveZst"
+        & zstd.exe -T0 -19 $Archive
         if ($?) {
+            Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
-            Write-LogSuccess "Backup compactado com sucesso: $Archive"
-            $BackupFinal = $Archive
+            Write-LogSuccess "Backup compactado com sucesso: $ArchiveZst"
+            $BackupFinal = $ArchiveZst
         } else {
             Write-LogError "Erro ao compactar o backup."
             $BackupFinal = $BackupDir
@@ -628,41 +650,64 @@ function Process-DumpAgainstDatabase {  # Função utilitária
     $Parts = $FileName -split "\."
 
     if ($Parts.Count -eq 2) {
-        # Dump de tabela
+        # Dump de objeto individual
         $dbName = $Parts[0]
-        $tableName = $Parts[1]
+        $objectName = $Parts[1]
 
-        Write-LogInfo "Verificando se a tabela '$tableName' existe no banco '$dbName'..."
+        Write-LogInfo "Verificando se o objeto '$objectName' existe no banco '$dbName'..."
 
-        $tableExists = Run-MySQLCommandRaw "SHOW TABLES FROM $dbName LIKE '$tableName';"
-        if ($tableExists) {
-            Write-LogSuccess "Tabela '$tableName' existe no banco de dados."
-        } else {
-            Write-LogError "Tabela '$tableName' não encontrada no banco de dados."
+        $objTypeQuery = Run-MySQLCommandRaw "SHOW FULL TABLES FROM $dbName WHERE Tables_in_$dbName = '$objectName';"
+        if (-not $objTypeQuery) {
+            Write-LogError "Objeto '$objectName' não encontrado no banco de dados '$dbName'."
             return
         }
 
-        $createCount = (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
-        if ($createCount -ge 1) {
-            Write-LogSuccess "Dump contém definição de tabela ($createCount CREATE TABLE encontrado)."
+        # Identifica se é VIEW (última palavra da linha)
+        $isView = ($objTypeQuery | ForEach-Object { ($_ -split '\s+')[-1] }) -eq 'VIEW'
+        if ($isView) {
+            Write-LogInfo "'$objectName' é uma VIEW."
+        }
+
+        # Verifica se o dump contém a estrutura esperada
+        $createCount = if ($isView) {
+            (Select-String -Path $DumpFile -Pattern "^\s*/\*!.*CREATE VIEW" | Measure-Object).Count
         } else {
-            Write-LogWarn "Dump não contém definição de tabela para '$tableName'."
+            (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
+        }
+
+        if ($createCount -ge 1) {
+            $tipo = if ($isView) { 'view' } else { 'tabela' }
+            Write-LogSuccess "Dump contém definição de $tipo ($createCount encontrado)."
+        } else {
+            $tipo = if ($isView) { 'view' } else { 'tabela' }
+            Write-LogWarn "Dump não contém definição de $tipo para '$objectName'."
         }
 
     } else {
         # Dump de banco completo
         $dbName = $Parts[0]
 
-        $realTables = Run-MySQLCommandRaw "SHOW TABLES FROM $dbName;" | Measure-Object | Select-Object -ExpandProperty Count
-        $dumpTables = (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
+        # Obtém nomes e tipos reais do banco
+        $realObjects = Run-MySQLCommandRaw "SHOW FULL TABLES FROM $dbName;"
+        $realTablesCount = ($realObjects | Where-Object { $_ -match "\s+BASE TABLE$" } | Measure-Object).Count
+        $realViewsCount  = ($realObjects | Where-Object { $_ -match "\s+VIEW$" }       | Measure-Object).Count
+        $realTotal = $realTablesCount + $realViewsCount
 
-        Write-LogInfo "Tabelas no banco: $realTables"
-        Write-LogInfo "Tabelas no dump: $dumpTables"
+        # Conta quantos CREATE TABLE ou CREATE VIEW existem no dump
+        $dumpCreateTable = (Select-String -Path $DumpFile -Pattern "^CREATE TABLE" | Measure-Object).Count
+        $dumpCreateView  = (Select-String -Path $DumpFile -Pattern "^\s*/\*!.*CREATE VIEW" | Measure-Object).Count
+        $dumpTotal = $dumpCreateTable + $dumpCreateView
 
-        if ($realTables -eq $dumpTables) {
-            Write-LogSuccess "Todas as tabelas foram exportadas corretamente."
+        # Logs individualizados
+        Write-LogInfo "Banco de dados '$dbName' contém: $realTablesCount tabela(s) e $realViewsCount view(s)"
+        Write-LogInfo "Total de objetos do banco: $realTotal"
+        Write-LogInfo "Dump '$(Split-Path $DumpFile -Leaf)' contém definição(ões) de: $dumpCreateTable tabela(s) e $dumpCreateView view(s)"
+        Write-LogInfo "Total de definição(ões) do dump: $dumpTotal"
+
+        if ($realTablesCount -eq $dumpCreateTable -and $realViewsCount -eq $dumpCreateView) {
+            Write-LogSuccess "Todas as tabelas e views foram exportadas corretamente."
         } else {
-            Write-LogWarn "Algumas tabelas NÃO foram exportadas!"
+            Write-LogWarn "Diferença detectada entre os objetos do banco e do dump!"
         }
     }
 }
@@ -708,15 +753,15 @@ function Verify-BackupIntegrity {  # Função principal
         return
     }
 
-    # Caso seja um único arquivo tar.bz2
-    if ($BackupPath -like "*.tar.bz2") {
+    # Caso seja um único arquivo tar.zst
+    if ($BackupPath -like "*.tar.zst") {
         if (-not (Test-CompressionDependencies)) { return }
 
         $TempDir = Join-Path $env:TEMP ("backup_" + (Get-Random))
         New-Item -ItemType Directory -Path $TempDir | Out-Null
 
         Write-LogInfo "Descompactando para: $TempDir"
-        & tar.exe -xjf $BackupPath -C $TempDir
+        & tar.exe --use-compress-program 'zstd.exe -d' -xf $BackupPath -C $TempDir
         if (!$?) {
             Write-LogError "Falha ao descompactar: $BackupPath"
             Remove-Item -Recurse -Force $TempDir
@@ -777,12 +822,12 @@ function Verify-BackupIntegrity {  # Função principal
             return
         }
 
-        # Se não há .sql, tenta verificar se há arquivos .tar.bz2
-        $TarFiles = Get-ChildItem -Path $BackupPath -Recurse -Filter *.tar.bz2 |
+        # Se não há .sql, tenta verificar se há arquivos .tar.zst
+        $TarFiles = Get-ChildItem -Path $BackupPath -Recurse -Filter *.tar.zst |
             Where-Object { ($_.FullName.Split('\').Count -le ($BackupPath.Split('\').Count + 2)) }
 
         if ($TarFiles.Count -eq 0) {
-            Write-LogError "Diretório de backup não contém arquivos '.sql' ou '.tar.bz2': $BackupPath"
+            Write-LogError "Diretório de backup não contém arquivos '.sql' ou '.tar.zst': $BackupPath"
             Write-Texto "`nAbortando."
             return
         }
@@ -794,7 +839,7 @@ function Verify-BackupIntegrity {  # Função principal
             New-Item -ItemType Directory -Path $TempDir | Out-Null
 
             Write-LogInfo "Descompactando para: $TempDir"
-            & tar.exe -xjf $tar.FullName -C $TempDir
+            & tar.exe --use-compress-program 'zstd.exe -d' -xf $tar.FullName -C $TempDir
             if (!$?) {
                 Write-LogError "Falha ao descompactar: $($tar.FullName)"
                 Remove-Item -Recurse -Force $TempDir
@@ -854,16 +899,16 @@ function Delete-OldBackups {
 
     Write-LogInfo "Verificando backups para excluir com mais de $Days dias em: $Destination"
 
-    # Remover arquivos .tar.bz2 antigos
+    # Remover arquivos .tar.zst antigos
     $JaInformouArq = $false
-    $Arquivos = Get-ChildItem -Path $Destination -Filter "*.tar.bz2" -File | Where-Object {
-        $_.Name -match "^\d{4}-\d{2}-\d{2}_\d{6}\.tar\.bz2$" -and
+    $Arquivos = Get-ChildItem -Path $Destination -Filter "*.tar.zst" -File | Where-Object {
+        $_.Name -match "^\d{4}-\d{2}-\d{2}_\d{6}\.tar\.zst$" -and
         $_.LastWriteTime -lt (Get-Date).AddDays(-$Days)
     }
 
     foreach ($Arquivo in $Arquivos) {
         if (-not $JaInformouArq) {
-            Write-LogInfo "Arquivo(s) compactado(s) '.tar.bz2' detectado(s) para exclusão..."
+            Write-LogInfo "Arquivo(s) compactado(s) '.tar.zst' detectado(s) para exclusão..."
             $JaInformouArq = $true
         }
         Write-LogInfo "Excluindo: $($Arquivo.FullName)"
@@ -928,7 +973,7 @@ function Delete-OldBackups {
 
 # Checar pré-requisitos
 function Check-Prerequisites {
-    $Dependencias = @("mysqldump.exe", "mysqladmin.exe", "mysql.exe", "git.exe" ,"tar.exe", "bzip2.exe")
+    $Dependencias = @("mysqldump.exe", "mysqladmin.exe", "mysql.exe", "tar.exe", "zstd.exe")
     $Faltando = $false
     $ConfirmarResp = @("s", "sim", "n", "nao")
 
@@ -1514,7 +1559,7 @@ function Opcao-Menu-BackupTodos {
     $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
 
     do {
-        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $pergunta = "Deseja compactar o backup em formato .tar.zst? (s/sim ou n/nao) [$DefaultCompress]"
         $confirmar = Read-Host $pergunta
         if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
         $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
@@ -1561,7 +1606,7 @@ function Opcao-Menu-BackupBanco {
     $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
 
     do {
-        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $pergunta = "Deseja compactar o backup em formato .tar.zst? (s/sim ou n/nao) [$DefaultCompress]"
         $confirmar = Read-Host $pergunta
         if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
         $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
@@ -1617,7 +1662,7 @@ function Opcao-Menu-BackupTabela {
     $dir = if ([string]::IsNullOrWhiteSpace($dir)) { $DefaultBackupDir } else { $dir }
 
     do {
-        $pergunta = "Deseja compactar o backup em formato .tar.bz2? (s/sim ou n/nao) [$DefaultCompress]"
+        $pergunta = "Deseja compactar o backup em formato .tar.zst? (s/sim ou n/nao) [$DefaultCompress]"
         $confirmar = Read-Host $pergunta
         if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${confirmar}" }
         $confirmar = if ([string]::IsNullOrWhiteSpace($confirmar)) { $DefaultCompress } else { $confirmar.ToLower() }
@@ -1655,7 +1700,7 @@ function Opcao-Menu-Integridade {
     $destino = if ([string]::IsNullOrWhiteSpace($destino)) { $DefaultBackupDir } else { $destino }
 
     do {
-        $pergunta = "Informe o nome do arquivo (tar.bz2) ou diretório com o(s) dump(s) '.sql'"
+        $pergunta = "Informe o nome do arquivo (tar.zst) ou diretório com o(s) dump(s) '.sql'"
         $backup = Read-Host $pergunta
         if ($Global:LogDebug) { Add-Content -Path $LogFile -Value "${pergunta}: ${backup}" }
         if ([string]::IsNullOrWhiteSpace($backup)) {
@@ -1765,7 +1810,13 @@ function Opcao-Menu-Ajuda {
 
 function Show-Ajuda {
     Write-Host ""
-    Write-Host "Uso: $($MyInvocation.ScriptName.Split('\')[-1]) [-a] [-d <database>] [-t <tabela>] [-o <diretório_destino>] [-c] [-l] [-r <dias>] [-v] [-h] [-C] [-i]" -ForegroundColor White
+    Write-Host "Sobre: Script para realizar o backup/dump do banco de dados Mysql/Mariadb, compactação e exclusão de" -ForegroundColor White
+    Write-Host "       backups antigos, dentre outras funcionalidades, em ambiente MS Windows (PowerShell 5.1 e 7+)." -ForegroundColor White
+    Write-Host ""
+    Write-Host "Licença: $LicencaGPL" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Uso: $($MyInvocation.ScriptName.Split('\')[-1]) [-a] [-d <database>] [-t <tabela>] [-o <diretório_destino>] [-c] [-l]" -ForegroundColor White
+    Write-Host "                             [-r <dias>] [-v] [-h] [-k] [-i]" -ForegroundColor White
     Write-Host ""
     Write-Host "Opções:" -ForegroundColor Yellow
     Write-Host "  <nenhuma>                 Entra no modo interativo"
@@ -1778,13 +1829,13 @@ function Show-Ajuda {
     Write-Host "                            Opcional com '-a/--all', '-d/--database' e '-t/--table'."
     Write-Host "                            Obrigatório com '-r/--remove' e '-v/--verify'."
     Write-Host ""
-    Write-Host "  -c, --compress            Compactar backup em formato .tar.bz2"
+    Write-Host "  -c, --compress            Compactar backup em formato .tar.zst"
     Write-Host "  -r, --remove <dias>       Remove backups com mais de <dias> dias"
     Write-Host "                            Requer '-o/--output' especificado."
     Write-Host ""
     Write-Host "  -v, --verify              Verifica a integridade de um backup"
     Write-Host "                            Quando usado isoladamente (sem '-a' ou '-d'),"
-    Write-Host "                            exige '-o/--output <diretório ou arquivo .tar.bz2>' "
+    Write-Host "                            exige '-o/--output <diretório ou arquivo .tar.zst>' "
     Write-Host "                            para localizar o backup a ser verificado."
     Write-Host "                            Se combinado com '-a' ou '-d', a verificação"
     Write-Host "                            será feita automaticamente após o backup."
@@ -1799,21 +1850,23 @@ function Show-Ajuda {
     Write-Host "  -> Backup de todos os bancos, com compactação e verificação:"
     Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -a -c -v"
     Write-Host "  -> Backup de um banco específico com log:"
-    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -o C:\Backup\BancoDados -l"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -o $DefaultBackupDir -l"
     Write-Host "  -> Backup de uma tabela:"
-    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -t mytable -o C:\Backup\BancoDados"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -d mydatabase -t mytable -o $DefaultBackupDir"
     Write-Host "  -> Remover backups com mais de 30 dias:"
-    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -r 30 -o C:\Backup\BancoDados"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -r 30 -o $DefaultBackupDir"
     Write-Host "  -> Verificar integridade de backup em diretório:"
-    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o C:\Backup\BancoDados\2025-05-24_095744"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o $DefaultBackupDir\2025-05-24_095744"
     Write-Host "  -> Verificar integridade de backup compactado:"
-    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o C:\Backup\BancoDados\2025-05-24_095744.tar.bz2"
+    Write-Host "     $($MyInvocation.ScriptName.Split('\')[-1]) -v -o $DefaultBackupDir\2025-05-24_095744.tar.zst"
     Write-Host ""
     Write-Host (
-        "[Importante:] -> Os logs deste script, quando habilitados, são gravados em: $LogFile`n" +
-        "              -> Obtenha também as ferramentas extras instalando o Git for Windows. Acesse o site: <https://gitforwindows.org>`n" +
-        "              -> No Agendador de Tarefas do Windows, o script deverá ser acionado da seguinte forma:`n" +
-        "                 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.ScriptName)`" -arg1 -arg2 ..."
+        "[Importante:] -> Os logs são gravados por padrão em: $LogFile`n" +
+        "              -> Para obter o compactador Zstandard (zstd.exe), acesse: <https://github.com/facebook/zstd>`n" +
+        "                 Adicione o zstd.exe no seu PATH do Windows.`n" +
+        "              -> No Agendador de Tarefas, o script deverá ser acionado por um dos comandos abaixo:`n" +
+        "                 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.ScriptName)`" -arg1 -arg2 ...`n" +
+        "                 pwsh.exe -NoProfile ... (para Powershell 7+)"
     )   -ForegroundColor Cyan
 }
 # =================================================================================
