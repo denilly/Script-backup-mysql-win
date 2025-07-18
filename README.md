@@ -162,3 +162,12 @@ Sugestões, melhorias ou correções podem ser enviadas via **pull requests** ou
 Este projeto está licenciado sob a **GNU General Public License v3.0**.
 
 ---
+
+## Versão para Linux disponível
+Caso esteja utilizando Linux, você pode utilizar a versão equivalente deste projeto desenvolvida em Shell Script.
+
+🔗 Acesse aqui:
+[script-backup-mysql (Shell Script)](https://github.com/denilly/Script-backup-mysql)
+
+
+---
