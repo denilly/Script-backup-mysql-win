@@ -1437,20 +1437,12 @@ function Check-MySQLInfo {
         return
     }
 
-    # Chama funções auxiliares
+    # Informa versão do SGBD
     Write-Texto ""
     Get-MySQLVersion
-    Write-Texto ""
-    List-DatabasesInfo
-    Write-Texto ""
-    List-UsersInfo
-    Write-Texto ""
-    List-UsersPrivileges
-    Write-Texto ""
-    List-UsersDbPrivileges
-    Write-Texto ""
 
     # Informações adicionais: uptime e conexões
+    Write-Texto ""
     try {
         $status = & mysqladmin.exe --defaults-file=$MyCnfTemp -h $SGBDHost -P $SGBDPort status 2>$null
 
@@ -1479,6 +1471,17 @@ function Check-MySQLInfo {
     } catch {
         Write-LogError "Erro ao coletar informações adicionais via mysqladmin."
     }
+
+    # Chama funções auxiliares
+    Write-Texto ""
+    List-DatabasesInfo
+    Write-Texto ""
+    List-UsersInfo
+    Write-Texto ""
+    List-UsersPrivileges
+    Write-Texto ""
+    List-UsersDbPrivileges
+
     Remove-MyCnf
 }
 # =================================================================================
