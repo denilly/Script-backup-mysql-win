@@ -44,7 +44,7 @@
 
 #  1. =============================== CONFIGURAÇÕES ===============================
 $ScriptVersion = '1.0'
-$ScriptRevision = '11/07/2025'
+$ScriptRevision = '21/07/2025'
 $LicencaGPL = 'GPL-3.0'
 
 # Credenciais e demais configurações do SGBD
@@ -53,15 +53,16 @@ $SGBDPassword = "senha_usuario"     # <-- Senha do usuário (Se a conta não exi
 $MySQLBinPath = "C:\Program Files\MySQL\MySQL Server 8.0\bin"    # <-- Caminho completo dos executáveis. Ajuste conforme instalação.
 $SGBDHost = "127.0.0.1"    # <-- Informe o host do banco de dados (localhost ou IP)
 $SGBDPort = "3306"         # <-- Informe a porta do banco de dados (padrão: 3306)
-$SGBDConnTimeout = "5"    # Timeout em segundos para conexão com o Banco de Dados
-$SGBDParams = "--single-transaction --quick --routines --events --triggers"    # Parâmetros padrão para o msqldump
-
-$DefaultBackupDir = "C:\backup\banco_dados"    # <-- Diretório padrão de destino do backup
-$DefaultCompress = "nao"    # Compactação
-$DefaultVerify = "sim"      # Verificação de integridade
-$DefaultRetentionDays = 10    # <-- Dias de retenção do backup
-
+$SGBDConnTimeout = "5"    # <-- Timeout em segundos para conexão com o Banco de Dados
+$SGBDParams = "--single-transaction --quick --routines --events --triggers"    # <-- Parâmetros padrão para o msqldump
 $MyCnfTemp = "$env:TEMP\.my.cnf.tmp"    # Arquivo temporário de configuração segura de login Mysql/Mariadb
+
+# Definições padrão
+$DefaultBackupDir = "C:\backup\banco_dados"    # <-- Diretório padrão de destino do backup
+$DefaultCompress = "nao"    # <-- Compactação
+$DefaultCompressLevel = 10  # <-- Defina o nível de compactação (1 a 20). Quanto maior o volume do backup, recomenda-se utilizar níveis mais baixos para evitar sobrecarga na CPU e na memória. Valor padrão sugerido: 10
+$DefaultVerify = "sim"      # <-- Verificação de integridade
+$DefaultRetentionDays = 10    # <-- Dias de retenção do backup
 
 # Log
 $LogDir = "C:\Logs"    # <-- Caminho para o log do sistema ou outro se preferir
@@ -414,7 +415,7 @@ function Backup-AllDatabases {
         & tar.exe -cf $Archive -C $Destination $DateNow
         # Compactar .tar com zstd
         Write-LogInfo "Compactando backup em: $ArchiveZst"
-        & zstd.exe -T0 -19 $Archive
+        & zstd.exe -T0 -$DefaultCompressLevel $Archive
         if ($?) {
             Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
@@ -503,7 +504,7 @@ function Backup-Database {
         & tar.exe -cf $Archive -C $Destination $DateNow
         # Compactar .tar com zstd
         Write-LogInfo "Compactando backup em: $ArchiveZst"
-        & zstd.exe -T0 -19 $Archive
+        & zstd.exe -T0 -$DefaultCompressLevel $Archive
         if ($?) {
             Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
@@ -603,7 +604,7 @@ function Backup-Table {
         & tar.exe -cf $Archive -C $Destination $DateNow
         # Compactar .tar com zstd
         Write-LogInfo "Compactando backup em: $ArchiveZst"
-        & zstd.exe -T0 -19 $Archive
+        & zstd.exe -T0 -$DefaultCompressLevel $Archive
         if ($?) {
             Remove-Item -Force $Archive
             Remove-Item -Recurse -Force $BackupDir
